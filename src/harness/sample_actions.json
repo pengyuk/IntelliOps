@@ -1,0 +1,18 @@
+[
+  {
+    "action_id": "act-001",
+    "name": "收集日志",
+    "description": "抓取最近30分钟支付相关服务日志",
+    "script": "scripts/collect_logs.sh",
+    "precheck": "check_access",
+    "rollback": null
+  },
+  {
+    "action_id": "act-002",
+    "name": "重启服务",
+    "description": "重启支付服务进程",
+    "script": "scripts/restart_service.sh",
+    "precheck": "confirm_owner",
+    "rollback": "scripts/start_service.sh"
+  }
+]

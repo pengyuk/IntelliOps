@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    {"id": "svc-001", "type": "Service", "name": "支付网关"},
+    {"id": "host-01", "type": "Host", "name": "支付主机01"},
+    {"id": "al-1", "type": "Alert", "name": "支付延迟告警", "severity": 4},
+    {"id": "chg-100", "type": "Change", "name": "部署支付服务_v1.2"}
+  ],
+  "edges": [
+    {"from": "svc-001", "to": "host-01", "rel": "runs_on"},
+    {"from": "al-1", "to": "svc-001", "rel": "related_to"},
+    {"from": "chg-100", "to": "svc-001", "rel": "affects"}
+  ]
+}

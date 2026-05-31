@@ -1,0 +1,7 @@
+{
+  "intents": [
+    {"intent": "query_incident", "examples": ["这个故障怎么回事", "incident inc-1 信息"]},
+    {"intent": "suggest_steps", "examples": ["下一步怎么办", "建议排查步骤"]},
+    {"intent": "exec_action", "examples": ["执行收集日志", "执行 act-001"]}
+  ]
+}

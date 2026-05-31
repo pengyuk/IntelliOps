@@ -1,0 +1,8 @@
+{
+  "@context": "http://schema.org/",
+  "@graph": [
+    {"@type": "Service", "name": "Service", "description": "业务服务实体"},
+    {"@type": "Host", "name": "Host", "description": "计算资源"},
+    {"@type": "Incident", "name": "Incident", "description": "故障事件"}
+  ]
+}

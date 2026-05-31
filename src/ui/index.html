@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>IntelliOps Prototype UI</title>
+</head>
+<body>
+  <h1>IntelliOps 原型示例</h1>
+  <div id="content"></div>
+  <script>
+    async function loadIncident() {
+      const res = await fetch('/incident/inc-1');
+      if (!res.ok) {
+        document.getElementById('content').innerText = '无法加载示例数据';
+        return;
+      }
+      const data = await res.json();
+      document.getElementById('content').innerText = JSON.stringify(data, null, 2);
+    }
+    loadIncident();
+  </script>
+</body>
+</html>
