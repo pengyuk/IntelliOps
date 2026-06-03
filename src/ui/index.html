@@ -136,8 +136,21 @@
     .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
     .chip { border: 1px solid var(--line); background: #fff; border-radius: 5px; padding: 3px 7px; font-size: 12px; }
     .message.operator { border-left: 4px solid var(--blue); }
+    .message.developer { border-left: 4px solid var(--cyan); }
     .message.approver { border-left: 4px solid var(--violet); }
     .message.copilot { border-left: 4px solid var(--green); }
+    .timeline-item.alert { border-left: 4px solid var(--red); }
+    .timeline-item.diagnosis { border-left: 4px solid var(--blue); }
+    .timeline-item.action_result, .timeline-item.action_execution { border-left: 4px solid var(--green); }
+    .timeline-item.status, .timeline-item.conclusion, .timeline-item.decision { border-left: 4px solid var(--violet); }
+    .result-box {
+      margin-top: 8px;
+      border: 1px solid #bbf7d0;
+      background: #f0fdf4;
+      border-radius: 7px;
+      padding: 8px;
+      font-size: 13px;
+    }
     .composer { border-top: 1px solid var(--line); padding: 10px; display: grid; gap: 8px; }
     textarea, select {
       width: 100%;
@@ -252,6 +265,7 @@
       selectedId: '',
       users: [],
       userId: 'ui-user',
+      currentUser: null,
       diagnosis: null,
       scripts: [],
       messages: [],
@@ -291,6 +305,29 @@
       return 'bad';
     }
 
+    function currentUser() {
+      return state.users.find(u => u.user_id === state.userId) || null;
+    }
+
+    function canExecute() {
+      return currentUser()?.role === 'operator';
+    }
+
+    function timelineLabel(type) {
+      return {
+        alert: '告警触发',
+        diagnosis: 'AI 推理',
+        action_result: '执行结果',
+        action_execution: '动作执行',
+        action_request: '审批请求',
+        action_approval: '审批结论',
+        status: '状态变更',
+        conclusion: '关键结论',
+        decision: '处置决策',
+        handoff: '开发协同'
+      }[type] || type || '事件';
+    }
+
     async function boot() {
       await Promise.all([loadUsers(), loadIncidents(), loadLogs()]);
       bindEvents();
@@ -305,7 +342,11 @@
       $('sendDiscussionBtn').onclick = sendDiscussion;
       $('askCopilotBtn').onclick = askCopilot;
       $('closeDialogBtn').onclick = () => $('postmortemDialog').close();
-      $('userSelect').onchange = (event) => { state.userId = event.target.value; };
+      $('userSelect').onchange = (event) => {
+        state.userId = event.target.value;
+        renderHeader();
+        renderScripts();
+      };
     }
 
     async function refreshAll() {
@@ -377,6 +418,7 @@
       $('headlineMeta').innerHTML = `
         <span class="badge">${esc(inc.incident_id)}</span>
         <span class="badge ${statusClass(inc.status)}">${esc(inc.status)}</span>
+        <span class="badge ${canExecute() ? 'ok' : 'warn'}">${canExecute() ? '运维可执行' : '协同只读'}</span>
         <span>服务 ${inc.kg_context?.services?.length || 0}</span>
         <span>告警 ${inc.related_alerts?.length || 0}</span>
         <span>变更 ${inc.related_changes?.length || 0}</span>
@@ -447,11 +489,15 @@
       if (!state.selectedId) return;
       const diag = state.diagnosis?.diagnosis_id || '';
       const data = await api(`/script/suggest?incident_id=${encodeURIComponent(state.selectedId)}&diagnosis_id=${encodeURIComponent(diag)}`);
-      state.scripts = data.suggestions || [];
+      state.scripts = (data.suggestions || []).map(script => ({
+        ...script,
+        last_result: [...state.logs].reverse().find(log => log.action_id === script.script_id && log.incident_id === state.selectedId)
+      }));
       renderScripts();
     }
 
     function renderScripts() {
+      const executable = canExecute();
       $('scripts').innerHTML = state.scripts.map(script => `
         <div class="card script ${esc(script.risk_level)}">
           <div class="row">
@@ -460,9 +506,16 @@
           </div>
           <p class="muted">${esc(script.explanation)}</p>
           <pre>${esc(script.code)}</pre>
+          ${script.last_result ? `
+            <div class="result-box">
+              <strong>最近执行结果</strong>
+              <div>${esc(script.last_result.output)}</div>
+              <div class="muted">${esc(script.last_result.conclusion || '')}</div>
+            </div>
+          ` : ''}
           <div class="row">
             <button data-verify="${esc(script.script_id)}">预执行</button>
-            <button class="${script.risk_level === 'high' ? 'danger' : 'primary'}" data-exec="${esc(script.script_id)}">执行</button>
+            <button class="${script.risk_level === 'high' ? 'danger' : 'primary'}" data-exec="${esc(script.script_id)}" ${executable ? '' : 'disabled'}>${executable ? '执行并回传 Copilot' : '仅运维可执行'}</button>
           </div>
         </div>
       `).join('') || '<div class="muted">暂无脚本建议。</div>';
@@ -481,12 +534,25 @@
         toast('高风险脚本需要先走审批，本原型保留为受控动作。');
         return;
       }
-      await api('/script/execute', {
+      if (!canExecute()) {
+        toast('当前角色只能协同分析，不能执行工具或脚本。');
+        return;
+      }
+      const result = await api('/script/execute', {
         method: 'POST',
-        body: JSON.stringify({ script_id: scriptId, requested_by: state.userId, lifecycle_type: 'once' })
+        body: JSON.stringify({
+          script_id: scriptId,
+          requested_by: state.userId,
+          lifecycle_type: 'once',
+          incident_id: state.selectedId,
+          diagnosis_id: state.diagnosis?.diagnosis_id,
+          feed_to_copilot: true
+        })
       });
-      await loadLogs();
-      toast('脚本已模拟执行并写入审计日志');
+      if (script) script.last_result = result;
+      renderScripts();
+      await Promise.all([loadLogs(), loadDiscussion(state.selectedId), loadTimeline(state.selectedId)]);
+      toast('脚本结果已展示，并已回传给 Copilot 继续分析');
     }
 
     async function loadDiscussion(id) {
@@ -507,9 +573,10 @@
     async function sendDiscussion() {
       const text = $('messageInput').value.trim();
       if (!text || !state.selectedId) return;
+      const role = currentUser()?.role || 'operator';
       await api(`/incident/${state.selectedId}/discussion`, {
         method: 'POST',
-        body: JSON.stringify({ author: state.userId, message: text, message_type: 'maintenance' })
+        body: JSON.stringify({ author: state.userId, message: text, message_type: role === 'developer' ? 'development' : 'maintenance' })
       });
       $('messageInput').value = '';
       await Promise.all([loadDiscussion(state.selectedId), loadTimeline(state.selectedId)]);
@@ -536,9 +603,11 @@
       const data = await api(`/incident/${id}/timeline`);
       state.timeline = data.timeline || [];
       $('timeline').innerHTML = state.timeline.map(item => `
-        <div class="timeline-item">
-          <div class="row"><strong>${esc(item.summary)}</strong><span class="muted">${esc(item.timestamp)}</span></div>
-          <div class="muted">${esc(item.actor)} · ${esc(item.event_type)}</div>
+        <div class="timeline-item ${esc(item.event_type)}">
+          <div class="row"><strong>${esc(timelineLabel(item.event_type))}</strong><span class="muted">${esc(item.timestamp)}</span></div>
+          <div>${esc(item.summary)}</div>
+          ${item.details ? `<div class="muted">${esc(item.details)}</div>` : ''}
+          <div class="muted">${esc(item.actor)} · ${esc(item.role || '')}</div>
         </div>
       `).join('') || '<div class="muted">暂无时间线。</div>';
     }
@@ -565,11 +634,16 @@
     async function loadLogs() {
       const data = await api('/action/logs');
       state.logs = data.logs || [];
-      $('logs').innerHTML = state.logs.slice().reverse().map(log => `
+      const visibleLogs = state.logs
+        .filter(log => !state.selectedId || !log.incident_id || log.incident_id === state.selectedId)
+        .slice()
+        .reverse();
+      $('logs').innerHTML = visibleLogs.map(log => `
         <div class="log">
-          <div class="row"><strong>${esc(log.action_id)}</strong><span class="badge ${log.status === 'success' ? 'ok' : 'warn'}">${esc(log.status)}</span></div>
-          <div class="muted">${esc(log.requested_by || '')}</div>
+          <div class="row"><strong>${esc(log.script_name || log.action_id)}</strong><span class="badge ${log.status === 'success' ? 'ok' : 'warn'}">${esc(log.status)}</span></div>
+          <div class="muted">${esc(log.requested_by || '')} · ${esc(log.created_at || '')}</div>
           <div>${esc(log.output || '')}</div>
+          ${log.conclusion ? `<div class="muted">${esc(log.conclusion)}</div>` : ''}
         </div>
       `).join('') || '<div class="muted">暂无执行日志。</div>';
     }

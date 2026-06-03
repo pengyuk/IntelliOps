@@ -56,16 +56,17 @@ ONTOLOGY_SCHEMA = {
 
 USERS: Dict[str, Dict[str, Any]] = {
     'ui-user': {'user_id': 'ui-user', 'name': '运维人员', 'role': 'operator'},
+    'dev-user': {'user_id': 'dev-user', 'name': '开发人员', 'role': 'developer'},
     'ops-manager': {'user_id': 'ops-manager', 'name': '审批经理', 'role': 'approver'},
     'admin': {'user_id': 'admin', 'name': '系统管理员', 'role': 'admin'},
 }
 
 PERMISSIONS: Dict[str, List[str]] = {
-    'create_request': ['operator', 'approver', 'admin'],
+    'create_request': ['operator'],
     'approve_request': ['approver', 'admin'],
-    'execute_action': ['approver', 'admin'],
-    'add_comment': ['operator', 'approver', 'admin'],
-    'add_timeline': ['operator', 'approver', 'admin'],
+    'execute_action': ['operator'],
+    'add_comment': ['operator', 'developer', 'approver', 'admin'],
+    'add_timeline': ['operator'],
 }
 
 COLLAB_MESSAGES: List[Dict[str, Any]] = [
@@ -130,6 +131,7 @@ def _add_timeline_event(incident_id: str, event_type: str, summary: str, actor: 
         'actor': actor,
         'role': role,
         'timestamp': _now_iso(),
+        'sequence': len(TIMELINE_EVENTS) + 1,
         'details': details,
     }
     TIMELINE_EVENTS.append(event)
@@ -139,7 +141,7 @@ def _add_timeline_event(incident_id: str, event_type: str, summary: str, actor: 
 def _incident_timeline(incident_id: str) -> List[Dict[str, Any]]:
     return sorted(
         [event for event in TIMELINE_EVENTS if event['incident_id'] == incident_id],
-        key=lambda x: x['timestamp'],
+        key=lambda x: (x['timestamp'], x.get('sequence', 0)),
         reverse=True
     )
 
@@ -152,7 +154,7 @@ def _incident_comments(incident_id: str) -> List[Dict[str, Any]]:
     )
 
 
-def _record_collaboration_comment(incident_id: str, author: str, message: str) -> Dict[str, Any]:
+def _record_collaboration_comment(incident_id: str, author: str, message: str, record_timeline: bool = False) -> Dict[str, Any]:
     user = _get_user(author)
     comment = {
         'comment_id': f'cmt-{str(uuid.uuid4())[:8]}',
@@ -160,10 +162,12 @@ def _record_collaboration_comment(incident_id: str, author: str, message: str) -
         'author': author,
         'role': user['role'],
         'message': message,
+        'message_type': 'discussion',
         'created_at': _now_iso()
     }
     COLLAB_MESSAGES.append(comment)
-    _add_timeline_event(incident_id, 'comment', f'添加协作评论：{message[:50]}', author, user['role'], message)
+    if record_timeline:
+        _add_timeline_event(incident_id, 'decision', f'记录关键协同结论：{message[:50]}', author, user['role'], message)
     return comment
 
 
@@ -220,15 +224,16 @@ class AlertIn(BaseModel):
 class ActionExecIn(BaseModel):
     action_id: str
     params: dict = {}
-    requested_by: str = "user-1"
+    requested_by: str = "ui-user"
     dry_run: bool = False
     request_id: Optional[str] = None
+    incident_id: Optional[str] = None
 
 class ActionRequestIn(BaseModel):
     action_id: str
     incident_id: str
     reason: str = ""
-    requested_by: str = "user-1"
+    requested_by: str = "ui-user"
 
 class ActionApprovalIn(BaseModel):
     request_id: str
@@ -271,9 +276,12 @@ class ScriptVerifyIn(BaseModel):
 
 class ScriptExecuteIn(BaseModel):
     script_id: str
-    requested_by: str = 'admin'
+    requested_by: str = 'ui-user'
     request_id: Optional[str] = None
     lifecycle_type: str = 'once'
+    incident_id: Optional[str] = None
+    diagnosis_id: Optional[str] = None
+    feed_to_copilot: bool = True
 
 class DiscussionIn(BaseModel):
     author: str = 'ui-user'
@@ -503,6 +511,7 @@ def _script_suggestions(incident_id: str, diagnosis_id: Optional[str] = None) ->
             'risk_level': 'low',
             'explanation': '只读采集日志，用于验证延迟、超时或异常堆栈。',
             'approval_required': False,
+            'incident_id': incident_id,
             'diagnosis_id': diagnosis_id,
         },
         {
@@ -515,6 +524,7 @@ def _script_suggestions(incident_id: str, diagnosis_id: Optional[str] = None) ->
             'risk_level': 'medium',
             'explanation': '模拟指标检查脚本，适合作为预执行验证样例。',
             'approval_required': False,
+            'incident_id': incident_id,
             'diagnosis_id': diagnosis_id,
         },
         {
@@ -527,10 +537,66 @@ def _script_suggestions(incident_id: str, diagnosis_id: Optional[str] = None) ->
             'risk_level': 'high',
             'explanation': '高风险恢复动作，需要审批后执行。',
             'approval_required': True,
+            'incident_id': incident_id,
             'diagnosis_id': diagnosis_id,
         },
     ]
     return [_upsert_script(script) for script in suggestions]
+
+def _simulate_script_output(script: Dict[str, Any], incident: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    script_id = script.get('script_id', '')
+    service_names = _node_names((incident or {}).get('affected_services', []))
+    service_text = ', '.join(service_names) or '受影响服务'
+    if 'metrics' in script_id:
+        output = 'db_pool_active=450 db_pool_max=500 slow_queries=27 p99_latency_ms=1850'
+        conclusion = f'{service_text} 的连接池接近上限，慢查询数量偏高，根因更偏向数据库连接池耗尽或慢查询堆积。'
+        next_suggestion = '建议开发人员确认连接池配置和最近发布；运维继续采集慢查询样本，暂不直接重启。'
+    elif 'log' in script_id:
+        output = 'ERROR timeout waiting for DB connection; WARN slow query detected; WARN retry payment callback'
+        conclusion = f'{service_text} 日志出现数据库连接等待超时与慢查询告警，支持“服务延迟由下游资源或连接池压力触发”的假设。'
+        next_suggestion = '建议继续检查 DB_CONN_ACTIVE、慢查询 SQL 与最近变更窗口。'
+    elif 'restart' in script_id:
+        output = f'systemctl restart requested for {service_text}; simulated restart completed'
+        conclusion = f'{service_text} 已完成模拟重启动作，但该动作属于恢复手段，不应替代根因确认。'
+        next_suggestion = '建议观察错误率和延迟是否回落，并补充最终根因说明。'
+    else:
+        output = f"模拟执行脚本：{script.get('name')}"
+        conclusion = '脚本执行完成，需要结合监控指标判断是否改善。'
+        next_suggestion = '建议把执行结果补充到诊断上下文后继续分析。'
+    return {
+        'output': output,
+        'conclusion': conclusion,
+        'next_suggestion': next_suggestion,
+    }
+
+def _append_copilot_execution_feedback(incident_id: str, diagnosis_id: Optional[str], execution: Dict[str, Any]) -> Dict[str, Any]:
+    response = (
+        f"已收到执行结果：{execution.get('output')}。"
+        f"结论：{execution.get('conclusion')} "
+        f"下一步：{execution.get('next_suggestion')}"
+    )
+    message = {
+        'comment_id': f'cmt-{str(uuid.uuid4())[:8]}',
+        'incident_id': incident_id,
+        'author': 'copilot',
+        'role': 'copilot',
+        'message': response,
+        'message_type': 'execution_analysis',
+        'execution_id': execution.get('execution_id'),
+        'diagnosis_id': diagnosis_id,
+        'created_at': _now_iso()
+    }
+    COLLAB_MESSAGES.append(message)
+    COPILOT_MESSAGES.append({
+        'message_id': f'cp-{str(uuid.uuid4())[:8]}',
+        'incident_id': incident_id,
+        'diagnosis_id': diagnosis_id,
+        'response': response,
+        'execution_result': execution,
+        'created_at': _now_iso(),
+        'user_id': 'copilot',
+    })
+    return message
 
 def _generate_postmortem(incident_id: str, requested_by: str = 'ui-user', mark_resolved: bool = True) -> Dict[str, Any]:
     incident = INCIDENTS.get(incident_id)
@@ -749,7 +815,7 @@ async def action_logs():
 
 @app.post('/copilot/diagnose')
 async def copilot_diagnose(req: CopilotDiagnoseIn):
-    _check_permission(req.user_id, 'add_timeline')
+    _check_permission(req.user_id, 'add_comment')
     inc = INCIDENTS.get(req.incident_id)
     if not inc:
         raise HTTPException(status_code=404, detail='incident not found')
@@ -833,6 +899,7 @@ async def copilot_chat(req: CopilotChatIn):
         'author': 'copilot',
         'role': 'copilot',
         'message': response,
+        'message_type': 'copilot_analysis',
         'created_at': _now_iso()
     })
     return message
@@ -864,28 +931,55 @@ async def execute_script(req: ScriptExecuteIn):
     script = SCRIPTS.get(req.script_id)
     if not script:
         raise HTTPException(status_code=404, detail='script not found')
+    _check_permission(req.requested_by, 'execute_action')
     if script.get('approval_required') and not req.request_id:
         raise HTTPException(status_code=403, detail='script requires approval request_id')
-    if script.get('approval_required'):
-        _check_permission(req.requested_by, 'execute_action')
+    incident_id = req.incident_id or script.get('incident_id')
+    incident = INCIDENTS.get(incident_id or '') if incident_id else None
+    simulation = _simulate_script_output(script, incident)
     exec_id = f'sexec-{str(uuid.uuid4())[:8]}'
     result = {
         'execution_id': exec_id,
         'script_id': req.script_id,
+        'incident_id': incident_id,
+        'diagnosis_id': req.diagnosis_id or script.get('diagnosis_id'),
+        'script_name': script.get('name'),
         'status': 'success',
         'started_at': _now_iso(),
         'requested_by': req.requested_by,
         'lifecycle_type': req.lifecycle_type,
-        'output': f"模拟执行脚本：{script.get('name')}",
+        'output': simulation['output'],
+        'conclusion': simulation['conclusion'],
+        'next_suggestion': simulation['next_suggestion'],
+        'fed_to_copilot': False,
     }
     ACTION_LOGS.append({
         'exec_id': exec_id,
+        'execution_id': exec_id,
         'action_id': req.script_id,
+        'incident_id': incident_id,
+        'diagnosis_id': result['diagnosis_id'],
+        'script_name': script.get('name'),
         'status': 'success',
         'output': result['output'],
+        'conclusion': result['conclusion'],
+        'next_suggestion': result['next_suggestion'],
         'requested_by': req.requested_by,
         'request_id': req.request_id,
+        'created_at': result['started_at'],
     })
+    if incident_id:
+        _add_timeline_event(
+            incident_id,
+            'action_result',
+            f"执行 {script.get('name')} 并形成观察结论",
+            req.requested_by,
+            _get_user(req.requested_by)['role'],
+            f"{result['conclusion']} 下一步：{result['next_suggestion']}"
+        )
+    if req.feed_to_copilot and incident_id:
+        _append_copilot_execution_feedback(incident_id, result['diagnosis_id'], result)
+        result['fed_to_copilot'] = True
     if req.lifecycle_type == 'permanent':
         script['knowledge_asset'] = True
     return result
@@ -924,7 +1018,8 @@ async def add_discussion(incident_id: str, payload: DiscussionIn):
         'created_at': _now_iso()
     }
     COLLAB_MESSAGES.append(comment)
-    _add_timeline_event(incident_id, 'discussion', f'新增讨论消息：{payload.message[:40]}', payload.author, user['role'])
+    if payload.message_type in ('decision', 'conclusion', 'handoff'):
+        _add_timeline_event(incident_id, payload.message_type, f'记录{payload.message_type}：{payload.message[:40]}', payload.author, user['role'], payload.message)
     return comment
 
 @app.post('/incident/{incident_id}/postmortem')
@@ -1041,8 +1136,9 @@ async def execute_action(req: ActionExecIn):
         "request_id": req.request_id,
     }
     ACTION_LOGS.append(result)
-    incident_id = request['incident_id'] if req.request_id else ''
-    _add_timeline_event(incident_id, 'action_execution', f'执行动作 {req.action_id}', req.requested_by, _get_user(req.requested_by)['role'], result['output'])
+    incident_id = request['incident_id'] if req.request_id else (req.incident_id or '')
+    if incident_id:
+        _add_timeline_event(incident_id, 'action_execution', f'执行动作 {req.action_id}', req.requested_by, _get_user(req.requested_by)['role'], result['output'])
     return result
 
 @app.post('/action/request')
