@@ -1,23 +1,605 @@
 <!doctype html>
-<html>
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>IntelliOps Prototype UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IntelliOps 应急认知工作间</title>
+  <style>
+    :root {
+      --bg: #eef3f8;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --blue: #2358d3;
+      --cyan: #0e7490;
+      --green: #15803d;
+      --amber: #a16207;
+      --red: #b42318;
+      --violet: #6d28d9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    button, input, textarea, select { font: inherit; }
+    button {
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 7px 10px;
+      cursor: pointer;
+      background: #f7f9fc;
+      color: var(--ink);
+      font-weight: 650;
+    }
+    button:hover { border-color: #a9b8ce; }
+    button.primary { background: var(--blue); color: #fff; }
+    button.ghost { background: transparent; border-color: var(--line); }
+    button.danger { background: #fff1f0; color: var(--red); border-color: #ffd1cc; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .app {
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+    header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      padding: 14px 18px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: 0; }
+    h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
+    .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #edf2ff;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+    .badge.ok { background: #dcfce7; color: #166534; }
+    .badge.warn { background: #fef3c7; color: #92400e; }
+    .badge.bad { background: #fee2e2; color: #991b1b; }
+    .top-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    main {
+      display: grid;
+      grid-template-columns: 250px minmax(420px, 1fr) 340px;
+      grid-template-rows: minmax(0, 1fr) 260px;
+      gap: 12px;
+      padding: 12px;
+      overflow: hidden;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel-head {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: #fbfdff;
+    }
+    .panel-body { padding: 10px; overflow: auto; min-height: 0; }
+    .incident-list { display: grid; gap: 8px; }
+    .incident {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 9px;
+      background: #f8fafc;
+      cursor: pointer;
+    }
+    .incident.active { border-color: var(--blue); background: #edf4ff; }
+    .incident strong { display: block; font-size: 13px; line-height: 1.35; }
+    .incident small { color: var(--muted); }
+    .workspace { grid-column: 2; grid-row: 1; display: grid; grid-template-rows: 1fr 210px; gap: 12px; min-height: 0; }
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; }
+    .context { grid-column: 1; grid-row: 1 / 3; }
+    .discussion { grid-column: 3; grid-row: 1 / 3; }
+    .scripts { grid-column: 2; grid-row: 2; }
+    .logs { grid-column: 3; grid-row: 2; }
+    .timeline-item, .card, .message, .log {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 9px;
+      background: #f8fafc;
+      margin-bottom: 8px;
+    }
+    .card.cause { border-left: 4px solid var(--blue); }
+    .card.asset { border-left: 4px solid var(--cyan); }
+    .script.low { border-left: 4px solid var(--green); }
+    .script.medium { border-left: 4px solid var(--amber); }
+    .script.high { border-left: 4px solid var(--red); }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .progress { height: 8px; background: #e6edf5; border-radius: 99px; overflow: hidden; margin-top: 6px; }
+    .progress span { display: block; height: 100%; background: var(--green); }
+    .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    .chip { border: 1px solid var(--line); background: #fff; border-radius: 5px; padding: 3px 7px; font-size: 12px; }
+    .message.operator { border-left: 4px solid var(--blue); }
+    .message.approver { border-left: 4px solid var(--violet); }
+    .message.copilot { border-left: 4px solid var(--green); }
+    .composer { border-top: 1px solid var(--line); padding: 10px; display: grid; gap: 8px; }
+    textarea, select {
+      width: 100%;
+      min-height: 44px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 8px;
+      background: #fff;
+      color: var(--ink);
+    }
+    .status-line {
+      position: fixed;
+      left: 50%;
+      bottom: 16px;
+      transform: translateX(-50%);
+      max-width: min(640px, calc(100vw - 24px));
+      background: #172033;
+      color: #fff;
+      padding: 9px 12px;
+      border-radius: 7px;
+      box-shadow: 0 8px 28px rgba(23,32,51,.2);
+      display: none;
+      z-index: 5;
+    }
+    dialog {
+      width: min(760px, calc(100vw - 24px));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0;
+    }
+    dialog::backdrop { background: rgba(15, 23, 42, .42); }
+    .modal-body { padding: 14px; max-height: 70vh; overflow: auto; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 7px; font-size: 12px; }
+    @media (max-width: 1100px) {
+      .app { height: auto; min-height: 100vh; overflow: visible; }
+      main { grid-template-columns: 1fr; grid-template-rows: auto; overflow: visible; }
+      .context, .workspace, .discussion, .scripts, .logs { grid-column: 1; grid-row: auto; }
+      .workspace, .split { grid-template-columns: 1fr; grid-template-rows: auto; }
+      .panel { min-height: 240px; }
+    }
+  </style>
 </head>
 <body>
-  <h1>IntelliOps 原型示例</h1>
-  <div id="content"></div>
+  <div class="app">
+    <header>
+      <div>
+        <h1 id="title">IntelliOps 应急认知工作间</h1>
+        <div id="headlineMeta" class="meta"></div>
+      </div>
+      <div class="top-actions">
+        <select id="userSelect" style="width:150px;min-height:34px"></select>
+        <button id="refreshBtn" class="ghost">刷新</button>
+        <button id="diagnoseBtn" class="primary">Copilot 诊断</button>
+        <button id="postmortemBtn">生成复盘</button>
+      </div>
+    </header>
+    <main>
+      <section class="panel context">
+        <div class="panel-head"><h2>事故与上下文</h2><span id="summaryBadge" class="badge"></span></div>
+        <div class="panel-body">
+          <div id="incidentList" class="incident-list"></div>
+          <h2 style="margin:14px 0 8px">知识上下文</h2>
+          <div id="kgContext"></div>
+          <h2 style="margin:14px 0 8px">时间线</h2>
+          <div id="timeline"></div>
+        </div>
+      </section>
+      <section class="workspace">
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head"><h2>根因推理</h2><span id="diagBadge" class="badge warn">待诊断</span></div>
+            <div id="diagnosis" class="panel-body"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>相似案例与知识资产</h2></div>
+            <div id="assets" class="panel-body"></div>
+          </section>
+        </div>
+        <section class="panel">
+          <div class="panel-head"><h2>脚本与处置动作</h2><button id="loadScriptsBtn" class="ghost">推荐脚本</button></div>
+          <div id="scripts" class="panel-body"></div>
+        </section>
+      </section>
+      <section class="panel discussion">
+        <div class="panel-head"><h2>协同讨论</h2><span class="badge ok">War Room</span></div>
+        <div id="messages" class="panel-body"></div>
+        <div class="composer">
+          <textarea id="messageInput" placeholder="向团队或 Copilot 补充现场信息"></textarea>
+          <div class="row">
+            <button id="sendDiscussionBtn">发送讨论</button>
+            <button id="askCopilotBtn" class="primary">问 Copilot</button>
+          </div>
+        </div>
+      </section>
+      <section class="panel logs">
+        <div class="panel-head"><h2>执行审计</h2><button id="loadLogsBtn" class="ghost">刷新日志</button></div>
+        <div id="logs" class="panel-body"></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="postmortemDialog">
+    <div class="panel-head"><h2>自动复盘报告</h2><button id="closeDialogBtn">关闭</button></div>
+    <div id="postmortemBody" class="modal-body"></div>
+  </dialog>
+  <div id="toast" class="status-line"></div>
   <script>
-    async function loadIncident() {
-      const res = await fetch('/incident/inc-1');
-      if (!res.ok) {
-        document.getElementById('content').innerText = '无法加载示例数据';
+    const API_BASE = location.origin && location.pathname.startsWith('/ui') ? location.origin : 'http://localhost:8000';
+    const state = {
+      incidents: [],
+      incident: null,
+      selectedId: '',
+      users: [],
+      userId: 'ui-user',
+      diagnosis: null,
+      scripts: [],
+      messages: [],
+      timeline: [],
+      logs: [],
+      assets: [],
+      cases: [],
+      postmortem: null
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, options = {}) {
+      const res = await fetch(API_BASE + path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    function toast(text) {
+      const box = $('toast');
+      box.textContent = text;
+      box.style.display = 'block';
+      clearTimeout(window.__toastTimer);
+      window.__toastTimer = setTimeout(() => box.style.display = 'none', 2600);
+    }
+
+    function esc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    function statusClass(status) {
+      if (status === 'Resolved') return 'ok';
+      if (status === 'Investigating') return 'warn';
+      return 'bad';
+    }
+
+    async function boot() {
+      await Promise.all([loadUsers(), loadIncidents(), loadLogs()]);
+      bindEvents();
+    }
+
+    function bindEvents() {
+      $('refreshBtn').onclick = refreshAll;
+      $('diagnoseBtn').onclick = runDiagnosis;
+      $('postmortemBtn').onclick = createPostmortem;
+      $('loadScriptsBtn').onclick = loadScripts;
+      $('loadLogsBtn').onclick = loadLogs;
+      $('sendDiscussionBtn').onclick = sendDiscussion;
+      $('askCopilotBtn').onclick = askCopilot;
+      $('closeDialogBtn').onclick = () => $('postmortemDialog').close();
+      $('userSelect').onchange = (event) => { state.userId = event.target.value; };
+    }
+
+    async function refreshAll() {
+      if (!state.selectedId) return;
+      await Promise.all([
+        loadIncidents(false),
+        loadIncident(state.selectedId),
+        loadTimeline(state.selectedId),
+        loadDiscussion(state.selectedId),
+        loadAssets(state.selectedId),
+        loadLogs()
+      ]);
+      toast('已刷新工作间数据');
+    }
+
+    async function loadUsers() {
+      const data = await api('/auth/users');
+      state.users = data.users || [];
+      $('userSelect').innerHTML = state.users.map(u => `<option value="${esc(u.user_id)}">${esc(u.name)} · ${esc(u.role)}</option>`).join('');
+      $('userSelect').value = state.userId;
+    }
+
+    async function loadIncidents(selectFirst = true) {
+      const data = await api('/incidents');
+      state.incidents = data.incidents || [];
+      $('summaryBadge').textContent = `${data.summary?.open || 0} 个处理中`;
+      if (selectFirst && !state.selectedId && state.incidents.length) state.selectedId = state.incidents[0].incident_id;
+      renderIncidentList();
+      if (state.selectedId) {
+        await Promise.all([
+          loadIncident(state.selectedId),
+          loadTimeline(state.selectedId),
+          loadDiscussion(state.selectedId),
+          loadAssets(state.selectedId)
+        ]);
+      }
+    }
+
+    function renderIncidentList() {
+      $('incidentList').innerHTML = state.incidents.map(inc => `
+        <button class="incident ${inc.incident_id === state.selectedId ? 'active' : ''}" data-id="${esc(inc.incident_id)}">
+          <strong>${esc(inc.summary)}</strong>
+          <small>${esc(inc.incident_id)} · ${esc(inc.status)}</small>
+        </button>
+      `).join('');
+      document.querySelectorAll('.incident').forEach(el => {
+        el.onclick = async () => {
+          state.selectedId = el.dataset.id;
+          state.diagnosis = null;
+          state.scripts = [];
+          renderIncidentList();
+          await refreshAll();
+          renderDiagnosis();
+          renderScripts();
+        };
+      });
+    }
+
+    async function loadIncident(id) {
+      state.incident = await api(`/incident/${id}`);
+      renderHeader();
+      renderContext();
+    }
+
+    function renderHeader() {
+      const inc = state.incident;
+      if (!inc) return;
+      $('title').textContent = inc.summary;
+      $('headlineMeta').innerHTML = `
+        <span class="badge">${esc(inc.incident_id)}</span>
+        <span class="badge ${statusClass(inc.status)}">${esc(inc.status)}</span>
+        <span>服务 ${inc.kg_context?.services?.length || 0}</span>
+        <span>告警 ${inc.related_alerts?.length || 0}</span>
+        <span>变更 ${inc.related_changes?.length || 0}</span>
+      `;
+    }
+
+    function renderContext() {
+      const inc = state.incident || {};
+      const groups = [
+        ['受影响服务', inc.kg_context?.services || []],
+        ['关联告警', inc.kg_context?.alerts || []],
+        ['关联变更', inc.kg_context?.changes || []]
+      ];
+      $('kgContext').innerHTML = groups.map(([title, items]) => `
+        <div class="card">
+          <div class="row"><strong>${title}</strong><span class="muted">${items.length} 项</span></div>
+          <div class="chips">${items.map(item => `<span class="chip">${esc(item.name || item.id)}</span>`).join('') || '<span class="muted">暂无</span>'}</div>
+        </div>
+      `).join('');
+    }
+
+    async function runDiagnosis() {
+      if (!state.selectedId) return;
+      $('diagnoseBtn').disabled = true;
+      try {
+        state.diagnosis = await api('/copilot/diagnose', {
+          method: 'POST',
+          body: JSON.stringify({ incident_id: state.selectedId, user_id: state.userId })
+        });
+        await Promise.all([loadTimeline(state.selectedId), loadScripts(), loadAssets(state.selectedId)]);
+        renderDiagnosis();
+        toast('Copilot 已生成根因推理');
+      } catch (err) {
+        toast('诊断失败：' + err.message);
+      } finally {
+        $('diagnoseBtn').disabled = false;
+      }
+    }
+
+    function renderDiagnosis() {
+      const diag = state.diagnosis;
+      $('diagBadge').textContent = diag ? `置信度 ${Math.round((diag.confidence_summary || 0) * 100)}%` : '待诊断';
+      if (!diag) {
+        $('diagnosis').innerHTML = '<div class="muted">点击“Copilot 诊断”启动根因推理、证据链和处置建议。</div>';
         return;
       }
-      const data = await res.json();
-      document.getElementById('content').innerText = JSON.stringify(data, null, 2);
+      $('diagnosis').innerHTML = `
+        ${(diag.candidate_root_causes || []).map((c, i) => `
+          <div class="card cause">
+            <div class="row"><strong>${i + 1}. ${esc(c.cause)}</strong><span class="badge">${Math.round((c.confidence || 0) * 100)}%</span></div>
+            <div class="progress"><span style="width:${Math.round((c.confidence || 0) * 100)}%"></span></div>
+            <p class="muted">${esc(c.detail || '')}</p>
+            <div class="chips">${(c.evidence_chain || []).map(e => `<span class="chip">${esc(e)}</span>`).join('')}</div>
+          </div>
+        `).join('')}
+        <h2 style="margin:12px 0 8px">推荐步骤</h2>
+        ${(diag.initial_recommendations || []).map(r => `
+          <div class="card">
+            <strong>${esc(r.step)}</strong>
+            <p class="muted">${esc(r.rationale)}</p>
+            <div class="chips">${(r.tools || []).map(t => `<span class="chip">${esc(t)}</span>`).join('') || '<span class="chip">人工确认</span>'}</div>
+          </div>
+        `).join('')}
+      `;
     }
-    loadIncident();
+
+    async function loadScripts() {
+      if (!state.selectedId) return;
+      const diag = state.diagnosis?.diagnosis_id || '';
+      const data = await api(`/script/suggest?incident_id=${encodeURIComponent(state.selectedId)}&diagnosis_id=${encodeURIComponent(diag)}`);
+      state.scripts = data.suggestions || [];
+      renderScripts();
+    }
+
+    function renderScripts() {
+      $('scripts').innerHTML = state.scripts.map(script => `
+        <div class="card script ${esc(script.risk_level)}">
+          <div class="row">
+            <strong>${esc(script.name)}</strong>
+            <span class="badge ${script.risk_level === 'high' ? 'bad' : script.risk_level === 'medium' ? 'warn' : 'ok'}">${esc(script.risk_level)}</span>
+          </div>
+          <p class="muted">${esc(script.explanation)}</p>
+          <pre>${esc(script.code)}</pre>
+          <div class="row">
+            <button data-verify="${esc(script.script_id)}">预执行</button>
+            <button class="${script.risk_level === 'high' ? 'danger' : 'primary'}" data-exec="${esc(script.script_id)}">执行</button>
+          </div>
+        </div>
+      `).join('') || '<div class="muted">暂无脚本建议。</div>';
+      document.querySelectorAll('[data-verify]').forEach(btn => btn.onclick = () => verifyScript(btn.dataset.verify));
+      document.querySelectorAll('[data-exec]').forEach(btn => btn.onclick = () => executeScript(btn.dataset.exec));
+    }
+
+    async function verifyScript(scriptId) {
+      const data = await api('/script/verify', { method: 'POST', body: JSON.stringify({ script_id: scriptId, user_id: state.userId }) });
+      toast(data.dry_run_result);
+    }
+
+    async function executeScript(scriptId) {
+      const script = state.scripts.find(s => s.script_id === scriptId);
+      if (script?.approval_required) {
+        toast('高风险脚本需要先走审批，本原型保留为受控动作。');
+        return;
+      }
+      await api('/script/execute', {
+        method: 'POST',
+        body: JSON.stringify({ script_id: scriptId, requested_by: state.userId, lifecycle_type: 'once' })
+      });
+      await loadLogs();
+      toast('脚本已模拟执行并写入审计日志');
+    }
+
+    async function loadDiscussion(id) {
+      const data = await api(`/incident/${id}/discussion`);
+      state.messages = data.messages || [];
+      renderMessages();
+    }
+
+    function renderMessages() {
+      $('messages').innerHTML = state.messages.map(msg => `
+        <div class="message ${esc(msg.role || 'operator')}">
+          <div class="row"><strong>${esc(msg.author)}</strong><span class="muted">${esc(msg.created_at || '')}</span></div>
+          <div>${esc(msg.message)}</div>
+        </div>
+      `).join('') || '<div class="muted">暂无讨论消息。</div>';
+    }
+
+    async function sendDiscussion() {
+      const text = $('messageInput').value.trim();
+      if (!text || !state.selectedId) return;
+      await api(`/incident/${state.selectedId}/discussion`, {
+        method: 'POST',
+        body: JSON.stringify({ author: state.userId, message: text, message_type: 'maintenance' })
+      });
+      $('messageInput').value = '';
+      await Promise.all([loadDiscussion(state.selectedId), loadTimeline(state.selectedId)]);
+    }
+
+    async function askCopilot() {
+      const text = $('messageInput').value.trim();
+      if (!text || !state.selectedId) return;
+      const data = await api('/copilot/chat', {
+        method: 'POST',
+        body: JSON.stringify({
+          incident_id: state.selectedId,
+          diagnosis_id: state.diagnosis?.diagnosis_id,
+          user_id: state.userId,
+          message: text
+        })
+      });
+      state.diagnosis = state.diagnosis || { diagnosis_id: data.diagnosis_id };
+      $('messageInput').value = '';
+      await Promise.all([loadDiscussion(state.selectedId), loadTimeline(state.selectedId), loadScripts()]);
+    }
+
+    async function loadTimeline(id) {
+      const data = await api(`/incident/${id}/timeline`);
+      state.timeline = data.timeline || [];
+      $('timeline').innerHTML = state.timeline.map(item => `
+        <div class="timeline-item">
+          <div class="row"><strong>${esc(item.summary)}</strong><span class="muted">${esc(item.timestamp)}</span></div>
+          <div class="muted">${esc(item.actor)} · ${esc(item.event_type)}</div>
+        </div>
+      `).join('') || '<div class="muted">暂无时间线。</div>';
+    }
+
+    async function loadAssets(id) {
+      const [cases, assets] = await Promise.all([
+        api(`/incident/${id}/related-cases`),
+        api(`/incident/${id}/knowledge-assets`)
+      ]);
+      state.cases = cases.cases || [];
+      state.assets = assets.assets || [];
+      $('assets').innerHTML = `
+        <h2 style="margin:0 0 8px">相似案例</h2>
+        ${state.cases.map(c => `
+          <div class="card asset"><strong>${esc(c.summary)}</strong><p class="muted">${esc(c.root_cause)} · 匹配 ${esc(c.similarity_score)}</p></div>
+        `).join('') || '<div class="muted">暂无高相似案例。</div>'}
+        <h2 style="margin:12px 0 8px">知识资产</h2>
+        ${state.assets.map(a => `
+          <div class="card asset"><strong>${esc(a.title)}</strong><p class="muted">${esc(a.description)} · 相关度 ${Math.round((a.relevance || 0) * 100)}%</p></div>
+        `).join('')}
+      `;
+    }
+
+    async function loadLogs() {
+      const data = await api('/action/logs');
+      state.logs = data.logs || [];
+      $('logs').innerHTML = state.logs.slice().reverse().map(log => `
+        <div class="log">
+          <div class="row"><strong>${esc(log.action_id)}</strong><span class="badge ${log.status === 'success' ? 'ok' : 'warn'}">${esc(log.status)}</span></div>
+          <div class="muted">${esc(log.requested_by || '')}</div>
+          <div>${esc(log.output || '')}</div>
+        </div>
+      `).join('') || '<div class="muted">暂无执行日志。</div>';
+    }
+
+    async function createPostmortem() {
+      if (!state.selectedId) return;
+      const report = await api(`/incident/${state.selectedId}/postmortem`, {
+        method: 'POST',
+        body: JSON.stringify({ requested_by: state.userId, mark_resolved: true })
+      });
+      state.postmortem = report;
+      $('postmortemBody').innerHTML = `
+        <div class="card">
+          <div class="row"><strong>${esc(report.postmortem_id)}</strong><span class="badge warn">${esc(report.status)}</span></div>
+          <p><strong>根因：</strong>${esc(report.root_cause_conclusion?.cause)}</p>
+          <p class="muted">置信度 ${Math.round((report.root_cause_conclusion?.confidence || 0) * 100)}%</p>
+        </div>
+        <h2>改进建议</h2>
+        ${(report.improvement_suggestions || []).map(item => `<div class="card">${esc(item)}</div>`).join('')}
+        <h2>时间线快照</h2>
+        ${(report.timeline || []).map(item => `<div class="timeline-item">${esc(item.timestamp)} · ${esc(item.summary)}</div>`).join('')}
+      `;
+      $('postmortemDialog').showModal();
+      await refreshAll();
+    }
+
+    boot().catch(err => {
+      console.error(err);
+      toast('启动失败：请确认后端服务已运行在 8000 端口');
+    });
   </script>
 </body>
 </html>

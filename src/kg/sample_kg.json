@@ -3,11 +3,19 @@
     {"id": "svc-001", "type": "Service", "name": "支付网关"},
     {"id": "host-01", "type": "Host", "name": "支付主机01"},
     {"id": "al-1", "type": "Alert", "name": "支付延迟告警", "severity": 4},
-    {"id": "chg-100", "type": "Change", "name": "部署支付服务_v1.2"}
+    {"id": "chg-100", "type": "Change", "name": "部署支付服务_v1.2"},
+    {"id": "svc-002", "type": "Service", "name": "订单服务"},
+    {"id": "host-02", "type": "Host", "name": "订单主机01"},
+    {"id": "al-2", "type": "Alert", "name": "订单失败告警", "severity": 3},
+    {"id": "chg-101", "type": "Change", "name": "订单服务配置变更"}
   ],
   "edges": [
     {"from": "svc-001", "to": "host-01", "rel": "runs_on"},
     {"from": "al-1", "to": "svc-001", "rel": "related_to"},
-    {"from": "chg-100", "to": "svc-001", "rel": "affects"}
+    {"from": "chg-100", "to": "svc-001", "rel": "affects"},
+    {"from": "svc-002", "to": "host-02", "rel": "runs_on"},
+    {"from": "al-2", "to": "svc-002", "rel": "related_to"},
+    {"from": "chg-101", "to": "svc-002", "rel": "affects"},
+    {"from": "svc-001", "to": "svc-002", "rel": "depends_on"}
   ]
 }

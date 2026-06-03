@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IntelliOps 故障应急工作间</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f0f4f8; color: #1f2937; }
+    .app { display: flex; flex-direction: column; height: 100vh; }
+    
+    /* 头部：事故状态 */
+    header.top-bar {
+      background: #fff;
+      border-bottom: 1px solid #e5e7eb;
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+
+    header .incident-header {
+      flex: 1;
+      min-width: 300px;
+    }
+
+    header h1 { margin: 0; font-size: 1.4rem; }
+    header .incident-meta { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 0.9rem; color: #6b7280; margin-top: 4px; }
+    header .incident-meta .badge { background: #e0f2fe; color: #0369a1; padding: 4px 10px; border-radius: 999px; font-weight: 600; }
+    header .incident-meta .impact { color: #dc2626; font-weight: 600; }
+    
+    header .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* 主容器：左侧+中央+右侧 */
+    .main-container {
+      display: grid;
+      grid-template-columns: 280px 1fr 320px;
+      gap: 16px;
+      flex: 1;
+      overflow: hidden;
+      padding: 16px;
+    }
+
+    /* 左侧：事故上下文 */
+    .context-panel {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    .context-panel h3 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid #f3f4f6;
+      background: #fafbfc;
+    }
+
+    .context-panel .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+    }
+
+    .context-section { margin-bottom: 16px; }
+    .context-section .title { font-size: 0.85rem; font-weight: 600; color: #6b7280; margin-bottom: 6px; text-transform: uppercase; }
+    .context-item { display: inline-flex; align-items: center; gap: 6px; background: #f3f4f6; color: #374151; border-radius: 6px; padding: 6px 10px; margin: 4px 4px 4px 0; font-size: 0.85rem; }
+
+    /* 中央：Copilot诊断 */
+    .diagnosis-panel {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    .diagnosis-panel h3 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid #f3f4f6;
+      background: #fafbfc;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .diagnosis-panel .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: #fef3c7;
+      color: #92400e;
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .diagnosis-panel .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 16px;
+    }
+
+    .diagnosis-result {
+      margin-bottom: 14px;
+      padding: 12px;
+      background: #f9fafb;
+      border-left: 3px solid #3b82f6;
+      border-radius: 6px;
+    }
+
+    .diagnosis-result .cause { font-weight: 600; color: #1f2937; }
+    .diagnosis-result .confidence { color: #0369a1; font-size: 0.9rem; font-weight: 600; }
+    .diagnosis-result .evidence { color: #6b7280; font-size: 0.85rem; margin-top: 4px; }
+
+    .chat-box {
+      padding: 12px;
+      border-top: 1px solid #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .chat-box textarea {
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 8px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 50px;
+    }
+
+    .chat-box button { padding: 8px 12px; font-size: 0.85rem; }
+
+    /* 右侧：讨论区 */
+    .discussion-panel {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    .discussion-panel h3 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid #f3f4f6;
+      background: #fafbfc;
+    }
+
+    .discussion-panel .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .message { padding: 8px; border-radius: 8px; font-size: 0.85rem; line-height: 1.4; }
+    .message.maintenance { background: #e0f2fe; border-left: 2px solid #0369a1; padding-left: 10px; }
+    .message.development { background: #fce7f3; border-left: 2px solid #ec4899; padding-left: 10px; }
+    .message.copilot { background: #f0fdf4; border-left: 2px solid #16a34a; padding-left: 10px; }
+    .message .author { font-weight: 600; font-size: 0.8rem; color: #6b7280; }
+    .message .text { margin-top: 2px; }
+
+    .discussion-input {
+      padding: 10px;
+      border-top: 1px solid #f3f4f6;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .discussion-input textarea {
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 40px;
+    }
+
+    .discussion-input button { padding: 6px 10px; font-size: 0.8rem; }
+
+    /* 下方：工具与脚本 + 执行日志 */
+    .bottom-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      padding: 0 16px 16px;
+      height: 40%;
+      overflow: hidden;
+    }
+
+    .tools-panel, .logs-panel {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    .tools-panel h3, .logs-panel h3 {
+      margin: 0;
+      padding: 12px 16px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #1f2937;
+      border-bottom: 1px solid #f3f4f6;
+      background: #fafbfc;
+    }
+
+    .tools-panel .content, .logs-panel .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+    }
+
+    .tool-item, .script-item {
+      padding: 10px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      font-size: 0.85rem;
+    }
+
+    .tool-item.approved { border-left: 3px solid #16a34a; background: #f0fdf4; }
+    .tool-item.copilot { border-left: 3px solid #eab308; background: #fefce8; }
+    .tool-item.high-risk { border-left: 3px solid #ef4444; background: #fef2f2; }
+
+    .tool-item .name { font-weight: 600; color: #1f2937; }
+    .tool-item .meta { color: #6b7280; font-size: 0.8rem; margin-top: 4px; }
+    .tool-item button { padding: 4px 8px; margin-top: 6px; font-size: 0.8rem; }
+
+    .log-item {
+      padding: 8px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      font-size: 0.8rem;
+    }
+
+    .log-item .action { font-weight: 600; color: #1f2937; }
+    .log-item .time { color: #9ca3af; font-size: 0.75rem; }
+    .log-item .output { color: #6b7280; margin-top: 2px; white-space: pre-wrap; word-break: break-all; max-height: 50px; overflow: hidden; }
+
+    /* 通用样式 */
+    button {
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      transition: all 0.15s ease;
+      font-weight: 500;
+    }
+
+    button.primary { background: #2563eb; color: #fff; }
+    button.primary:hover { background: #1d4ed8; transform: translateY(-1px); }
+    button.secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+    button.secondary:hover { background: #e5e7eb; }
+    button.danger { background: #ef4444; color: #fff; }
+    button.danger:hover { background: #dc2626; }
+    button[disabled] { opacity: 0.6; cursor: not-allowed; }
+
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
+    .badge.info { background: #e0f2fe; color: #0369a1; }
+    .badge.success { background: #dcfce7; color: #15803d; }
+    .badge.warning { background: #fef3c7; color: #92400e; }
+    .badge.danger { background: #fee2e2; color: #991b1b; }
+
+    .message-box { background: #f3f4f6; color: #374151; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 0.9rem; }
+
+    /* 响应式 */
+    @media (max-width: 1400px) {
+      .main-container { grid-template-columns: 240px 1fr 280px; gap: 12px; padding: 12px; }
+      .bottom-container { padding: 0 12px 12px; gap: 12px; }
+    }
+
+    @media (max-width: 1024px) {
+      .main-container { grid-template-columns: 1fr; }
+      .bottom-container { grid-template-columns: 1fr; height: auto; }
+      header { padding: 12px; }
+      .incident-meta { font-size: 0.85rem; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root" class="app"></div>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const API_BASE = 'http://localhost:8000';
+
+    function fetchJson(url, options) {
+      const fullUrl = url.startsWith('http') ? url : API_BASE + url;
+      return fetch(fullUrl, options).then(async (res) => {
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`${res.status}: ${text}`);
+        }
+        return res.json();
+      });
+    }
+
+    // 模拟Copilot诊断数据（后端未实现时用）
+    const MOCK_DIAGNOSIS = {
+      diagnosis_id: 'diag-20260602-001',
+      candidates: [
+        {
+          cause: '数据库连接池耗尽',
+          confidence: 0.78,
+          evidence: ['连接数450/500', '查询延迟↑150%', '最近部署变更']
+        },
+        {
+          cause: '缓存击穿导致DB压力',
+          confidence: 0.45,
+          evidence: ['缓存命中率↓', 'Redis连接正常']
+        }
+      ],
+      recommendations: [
+        { step: '查询数据库连接池配置', tool: 'show_db_pool_config' },
+        { step: '检查慢查询日志', tool: 'query_slow_logs' }
+      ]
+    };
+
+    // 模拟工具数据
+    const MOCK_TOOLS = [
+      { id: 'show_db_pool_config', name: 'show_db_pool_config', category: 'approved', description: '查看DB连接池配置', risk: 'low' },
+      { id: 'query_slow_logs', name: 'query_slow_logs', category: 'approved', description: '查询慢查询日志', risk: 'low' },
+      { id: 'kill_slow_queries', name: 'kill_slow_queries', category: 'high_risk', description: '杀死长时间运行的查询', risk: 'high' }
+    ];
+
+    function IncidentHeader({ incident, currentUser }) {
+      if (!incident) return null;
+      return (
+        <header className="top-bar">
+          <div className="incident-header">
+            <h1>{incident.summary}</h1>
+            <div className="incident-meta">
+              <span className="badge info">{incident.incident_id}</span>
+              <span className="badge info">{incident.status}</span>
+              <span className="impact">⚠️ 影响 {incident.kg_context?.services?.length || 0} 服务</span>
+              <span>SLA风险: {Math.round(Math.random() * 100)}%</span>
+            </div>
+          </div>
+          <div className="controls">
+            <select style={{ padding: '8px 12px', borderRadius: '8px', border: '1px solid #d1d5db' }}>
+              <option>{currentUser?.name || 'User'} ({currentUser?.role})</option>
+            </select>
+            <button className="primary">刷新诊断</button>
+          </div>
+        </header>
+      );
+    }
+
+    function ContextPanel({ incident }) {
+      if (!incident) return null;
+      return (
+        <div className="context-panel">
+          <h3>📋 上下文</h3>
+          <div className="content">
+            <div className="context-section">
+              <div className="title">受影响服务</div>
+              {(incident.kg_context?.services || []).map(svc => (
+                <div key={svc.id} className="context-item">{svc.name}</div>
+              ))}
+            </div>
+            <div className="context-section">
+              <div className="title">活跃告警</div>
+              {(incident.kg_context?.alerts || []).map(alert => (
+                <div key={alert.id} className="context-item">🔴 {alert.name}</div>
+              ))}
+            </div>
+            <div className="context-section">
+              <div className="title">最近变更</div>
+              {(incident.kg_context?.changes || []).map(change => (
+                <div key={change.id} className="context-item">{change.name}</div>
+              ))}
+            </div>
+            <div className="context-section">
+              <div className="title">KG关系</div>
+              <div className="context-item" style={{ fontSize: '0.8rem', color: '#9ca3af' }}>
+                {incident.kg_context?.services?.length || 0} 服务 • {incident.kg_context?.alerts?.length || 0} 告警
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function DiagnosisPanel({ incident, selectedIncidentId }) {
+      const [diagnosis, setDiagnosis] = useState(MOCK_DIAGNOSIS);
+      const [chatInput, setChatInput] = useState('');
+      const [diagnosing, setDiagnosing] = useState(false);
+
+      const handleDiagnose = async () => {
+        if (!selectedIncidentId) return;
+        setDiagnosing(true);
+        // 实际上应该调用 POST /copilot/diagnose
+        // 现在用mock数据
+        setTimeout(() => setDiagnosing(false), 800);
+      };
+
+      const handleChat = () => {
+        if (!chatInput.trim()) return;
+        // 实际上应该调用 POST /copilot/chat
+        setChatInput('');
+      };
+
+      return (
+        <div className="diagnosis-panel">
+          <h3>
+            🤖 Copilot诊断
+            <span className="status-badge">{diagnosing ? '分析中...' : '就绪'}</span>
+          </h3>
+          <div className="content">
+            {diagnosis && (
+              <>
+                <div style={{ marginBottom: '12px' }}>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '8px' }}>根因候选</div>
+                  {diagnosis.candidates.map((c, i) => (
+                    <div key={i} className="diagnosis-result">
+                      <div className="cause">{i + 1}. {c.cause}</div>
+                      <div className="confidence">置信度: {(c.confidence * 100).toFixed(0)}%</div>
+                      <div className="evidence">证据: {c.evidence.join(' • ')}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '8px' }}>推荐诊断步骤</div>
+                {diagnosis.recommendations.map((r, i) => (
+                  <div key={i} style={{ padding: '8px', background: '#f0fdf4', border: '1px solid #dcfce7', borderRadius: '6px', marginBottom: '6px', fontSize: '0.85rem' }}>
+                    <div style={{ fontWeight: 600 }}>{r.step}</div>
+                    <div style={{ color: '#6b7280', fontSize: '0.8rem', marginTop: '2px' }}>工具: {r.tool}</div>
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+
+          <div className="chat-box">
+            <textarea
+              placeholder="与Copilot讨论...（如：我已检查日志，发现...）"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChat())}
+            />
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button className="primary" onClick={handleChat} disabled={!chatInput.trim()}>
+                发送
+              </button>
+              <button className="secondary" onClick={handleDiagnose} disabled={diagnosing}>
+                {diagnosing ? '分析中...' : '重新诊断'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function DiscussionPanel({ incident, selectedIncidentId, currentUser }) {
+      const [messages, setMessages] = useState([
+        { id: 'm1', author: '李明', role: '运维', type: 'maintenance', text: '已接入故障，开始诊断', time: '14:20' },
+        { id: 'm2', author: 'Copilot', role: 'AI', type: 'copilot', text: '自动诊断已启动。发现3个根因候选，置信度最高的是数据库连接池耗尽（78%）', time: '14:21' },
+        { id: 'm3', author: '王刚', role: '开发', type: 'development', text: '我来检查一下最近的变更，是否有连接池相关的改动', time: '14:23' }
+      ]);
+      const [msgInput, setMsgInput] = useState('');
+
+      const handleSendMsg = () => {
+        if (!msgInput.trim()) return;
+        const newMsg = {
+          id: `m${messages.length + 1}`,
+          author: currentUser?.name || 'User',
+          role: currentUser?.role || 'unknown',
+          type: currentUser?.role === 'operator' ? 'maintenance' : currentUser?.role === 'approver' ? 'development' : 'copilot',
+          text: msgInput,
+          time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+        };
+        setMessages([...messages, newMsg]);
+        setMsgInput('');
+      };
+
+      return (
+        <div className="discussion-panel">
+          <h3>💬 多角色讨论</h3>
+          <div className="messages">
+            {messages.map(msg => (
+              <div key={msg.id} className={`message ${msg.type}`}>
+                <div className="author">{msg.author} ({msg.role}) · {msg.time}</div>
+                <div className="text">{msg.text}</div>
+              </div>
+            ))}
+          </div>
+          <div className="discussion-input">
+            <textarea
+              placeholder="@提及讨论... (输入@可@提及)"
+              value={msgInput}
+              onChange={(e) => setMsgInput(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSendMsg())}
+            />
+            <button className="primary" onClick={handleSendMsg} style={{ alignSelf: 'flex-end', width: '60px' }}>
+              发送
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function ToolsPanel() {
+      const [tools] = useState(MOCK_TOOLS);
+
+      return (
+        <div className="tools-panel">
+          <h3>🔧 工具与脚本建议</h3>
+          <div className="content">
+            {tools.map(tool => (
+              <div key={tool.id} className={`tool-item ${tool.category}`}>
+                <div className="name">{tool.name}</div>
+                <div className="meta">{tool.description} • {tool.risk}</div>
+                <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
+                  <button className="secondary" style={{ fontSize: '0.75rem', padding: '4px 8px' }}>执行</button>
+                  <button className="secondary" style={{ fontSize: '0.75rem', padding: '4px 8px' }}>详情</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function LogsPanel({ logs }) {
+      return (
+        <div className="logs-panel">
+          <h3>📊 执行日志</h3>
+          <div className="content">
+            {logs && logs.length > 0 ? logs.slice(0, 10).map(log => (
+              <div key={log.exec_id} className="log-item">
+                <div className="action">{log.action_id}</div>
+                <div className="time">{log.status}</div>
+                <div className="output">{log.output?.substring(0, 100) || '无输出'}</div>
+              </div>
+            )) : <p style={{ color: '#9ca3af', fontSize: '0.85rem' }}>暂无日志</p>}
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [incidents, setIncidents] = useState([]);
+      const [selectedIncidentId, setSelectedIncidentId] = useState('');
+      const [incident, setIncident] = useState(null);
+      const [logs, setLogs] = useState([]);
+      const [message, setMessage] = useState('');
+      const [users, setUsers] = useState([]);
+      const [currentUserId, setCurrentUserId] = useState('');
+
+      useEffect(() => {
+        loadUsers();
+        loadIncidents();
+        loadLogs();
+      }, []);
+
+      useEffect(() => {
+        if (selectedIncidentId) loadIncidentDetail(selectedIncidentId);
+      }, [selectedIncidentId]);
+
+      function showMessage(text) {
+        setMessage(text);
+        setTimeout(() => setMessage(''), 3000);
+      }
+
+      async function loadIncidents() {
+        try {
+          const data = await fetchJson('/incidents');
+          setIncidents(data.incidents || []);
+          if (!selectedIncidentId && data.incidents?.length) {
+            setSelectedIncidentId(data.incidents[0].incident_id);
+          }
+        } catch (err) {
+          showMessage(err.message);
+        }
+      }
+
+      async function loadIncidentDetail(incidentId) {
+        try {
+          const [inc, kg] = await Promise.all([
+            fetchJson(`/incident/${incidentId}`),
+            fetchJson(`/kg/incident/${incidentId}`)
+          ]);
+          setIncident(inc);
+        } catch (err) {
+          showMessage(err.message);
+        }
+      }
+
+      async function loadLogs() {
+        try {
+          const data = await fetchJson('/action/logs');
+          setLogs(data.logs || []);
+        } catch (err) {
+          showMessage(err.message);
+        }
+      }
+
+      async function loadUsers() {
+        try {
+          const data = await fetchJson('/auth/users');
+          setUsers(data.users || []);
+          if (data.users?.length) setCurrentUserId(data.users[0].user_id);
+        } catch (err) {
+          showMessage(err.message);
+        }
+      }
+
+      const currentUser = users.find(u => u.user_id === currentUserId);
+
+      return (
+        <div className="app">
+          <IncidentHeader incident={incident} currentUser={currentUser} />
+          {message && <div className="message-box">ℹ️ {message}</div>}
+          
+          <div className="main-container">
+            <ContextPanel incident={incident} />
+            <DiagnosisPanel incident={incident} selectedIncidentId={selectedIncidentId} />
+            <DiscussionPanel incident={incident} selectedIncidentId={selectedIncidentId} currentUser={currentUser} />
+          </div>
+
+          <div className="bottom-container">
+            <ToolsPanel />
+            <LogsPanel logs={logs} />
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

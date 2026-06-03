@@ -1,0 +1,30 @@
+{
+  "@context": {
+    "@vocab": "http://example.org/ontology/",
+    "name": "http://schema.org/name",
+    "type": "http://schema.org/additionalType",
+    "severity": "http://schema.org/Integer"
+  },
+  "@graph": [
+    {
+      "@id": "Service",
+      "@type": "rdfs:Class",
+      "name": "Service"
+    },
+    {
+      "@id": "Host",
+      "@type": "rdfs:Class",
+      "name": "Host"
+    },
+    {
+      "@id": "Alert",
+      "@type": "rdfs:Class",
+      "name": "Alert"
+    },
+    {
+      "@id": "Change",
+      "@type": "rdfs:Class",
+      "name": "Change"
+    }
+  ]
+}

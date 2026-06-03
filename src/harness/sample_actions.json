@@ -5,7 +5,8 @@
     "description": "抓取最近30分钟支付相关服务日志",
     "script": "scripts/collect_logs.sh",
     "precheck": "check_access",
-    "rollback": null
+    "rollback": null,
+    "requires_approval": false
   },
   {
     "action_id": "act-002",
@@ -13,6 +14,7 @@
     "description": "重启支付服务进程",
     "script": "scripts/restart_service.sh",
     "precheck": "confirm_owner",
-    "rollback": "scripts/start_service.sh"
+    "rollback": "scripts/start_service.sh",
+    "requires_approval": true
   }
 ]
