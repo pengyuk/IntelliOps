@@ -75,11 +75,12 @@
     .top-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
     main {
       display: grid;
-      grid-template-columns: 250px minmax(420px, 1fr) 340px;
-      grid-template-rows: minmax(0, 1fr) 260px;
+      grid-template-columns: var(--col1,250px) var(--col2,minmax(420px,1fr)) var(--col3,340px);
+      grid-template-rows: 1fr;
       gap: 12px;
       padding: 12px;
       overflow: hidden;
+      position: relative;
     }
     .panel {
       background: var(--panel);
@@ -99,7 +100,11 @@
       gap: 8px;
       background: #fbfdff;
     }
-    .panel-body { padding: 10px; overflow: auto; min-height: 0; }
+    .panel-head.resize-drag { cursor: row-resize; }
+    .panel-head.resize-drag:hover { background: rgba(15,23,42,0.04); }
+    .panel-body { padding: 10px; overflow: auto; min-height: 0; flex: 1; }
+    .panel { display: flex; flex-direction: column; min-height: 0; }
+    .composer { flex-shrink: 0; }
     .incident-list { display: grid; gap: 8px; }
     .incident {
       border: 1px solid var(--line);
@@ -111,12 +116,37 @@
     .incident.active { border-color: var(--blue); background: #edf4ff; }
     .incident strong { display: block; font-size: 13px; line-height: 1.35; }
     .incident small { color: var(--muted); }
-    .workspace { grid-column: 2; grid-row: 1; display: grid; grid-template-rows: 1fr 210px; gap: 12px; min-height: 0; }
-    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; }
-    .context { grid-column: 1; grid-row: 1 / 3; }
-    .discussion { grid-column: 3; grid-row: 1 / 3; }
+    .workspace { grid-column: 2; grid-row: 1; display: grid; grid-template-rows: minmax(0,1fr) minmax(120px, var(--workspace-bottom,260px)); gap: 12px; min-height: 0; }
+    .split { display: grid; grid-template-columns: var(--workspace-left,1fr) 10px var(--workspace-right,1fr); gap: 0; min-height: 0; height: 100%; }
+    .split > .panel { min-height: 0; }
+    .context { grid-column: 1; grid-row: 1; }
+    .right-col { grid-column: 3; grid-row: 1; display: grid; grid-template-rows: minmax(0,1fr) minmax(120px, var(--right-bottom,260px)); gap: 12px; min-height: 0; }
+    .discussion { grid-row: 1; }
     .scripts { grid-column: 2; grid-row: 2; }
-    .logs { grid-column: 3; grid-row: 2; }
+    .logs { grid-row: 2; }
+    .split-resizer {
+      width: 10px;
+      cursor: col-resize;
+      background: transparent;
+      z-index: 6;
+    }
+    .split-resizer:hover { background: rgba(15,23,42,0.06); }
+    .panel-row-resizer {
+      height: 8px;
+      cursor: row-resize;
+      background: transparent;
+      margin: 0;
+    }
+    .panel-row-resizer:hover { background: rgba(15,23,42,0.06); }
+    .col-resizer {
+      grid-row: 1 / -1;
+      width: 10px;
+      background: transparent;
+      cursor: col-resize;
+      justify-self: start;
+      z-index: 6;
+    }
+    .col-resizer:hover { background: rgba(15,23,42,0.04); }
     .timeline-item, .card, .message, .log {
       border: 1px solid var(--line);
       border-radius: 7px;
@@ -177,11 +207,19 @@
       z-index: 5;
     }
     dialog {
+      position: fixed;
+      left: 50%;
+      top: 12%;
+      transform: translateX(-50%);
       width: min(760px, calc(100vw - 24px));
+      max-height: 80vh;
+      resize: both;
+      overflow: auto;
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 0;
     }
+    #postmortemDialog .panel-head { cursor: grab; }
     dialog::backdrop { background: rgba(15, 23, 42, .42); }
     .modal-body { padding: 14px; max-height: 70vh; overflow: auto; }
     pre { white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 7px; font-size: 12px; }
@@ -204,11 +242,14 @@
       <div class="top-actions">
         <select id="userSelect" style="width:150px;min-height:34px"></select>
         <button id="refreshBtn" class="ghost">刷新</button>
+        <button id="loadDataBtn" class="ghost">数据摘要</button>
         <button id="diagnoseBtn" class="primary">Copilot 诊断</button>
         <button id="postmortemBtn">生成复盘</button>
       </div>
     </header>
     <main>
+      <div id="col-resizer-1" class="col-resizer" style="grid-column:2;"></div>
+      <div id="col-resizer-2" class="col-resizer" style="grid-column:3;"></div>
       <section class="panel context">
         <div class="panel-head"><h2>事故与上下文</h2><span id="summaryBadge" class="badge"></span></div>
         <div class="panel-body">
@@ -225,35 +266,49 @@
             <div class="panel-head"><h2>根因推理</h2><span id="diagBadge" class="badge warn">待诊断</span></div>
             <div id="diagnosis" class="panel-body"></div>
           </section>
+          <div id="workspace-splitter" class="split-resizer"></div>
           <section class="panel">
             <div class="panel-head"><h2>相似案例与知识资产</h2></div>
             <div id="assets" class="panel-body"></div>
           </section>
         </div>
-        <section class="panel">
-          <div class="panel-head"><h2>脚本与处置动作</h2><button id="loadScriptsBtn" class="ghost">推荐脚本</button></div>
+        <section id="scriptsSection" class="panel">
+          <div class="panel-head resize-drag"><h2>脚本与处置动作</h2><button id="loadScriptsBtn" class="ghost">推荐脚本</button></div>
           <div id="scripts" class="panel-body"></div>
+          <div id="scripts-row-resizer" class="panel-row-resizer"></div>
         </section>
       </section>
-      <section class="panel discussion">
-        <div class="panel-head"><h2>协同讨论</h2><span class="badge ok">War Room</span></div>
-        <div id="messages" class="panel-body"></div>
-        <div class="composer">
-          <textarea id="messageInput" placeholder="向团队或 Copilot 补充现场信息"></textarea>
-          <div class="row">
-            <button id="sendDiscussionBtn">发送讨论</button>
-            <button id="askCopilotBtn" class="primary">问 Copilot</button>
+      <div class="right-col">
+        <section class="panel discussion">
+          <div class="panel-head"><h2>协同讨论</h2><span class="badge ok">War Room</span></div>
+          <div id="messages" class="panel-body"></div>
+          <div class="composer">
+            <textarea id="messageInput" placeholder="向团队或 Copilot 补充现场信息"></textarea>
+            <div class="row">
+              <button id="sendDiscussionBtn">发送讨论</button>
+              <button id="askCopilotBtn" class="primary">问 Copilot</button>
+            </div>
           </div>
+        </section>
+        <section id="logsSection" class="panel logs">
+          <div class="panel-head resize-drag"><h2>执行审计</h2><button id="loadLogsBtn" class="ghost">刷新日志</button></div>
+          <div id="logs-row-resizer" class="panel-row-resizer"></div>
+          <div class="panel-body">
+          <div class="row" style="gap:8px;margin-bottom:12px;align-items:center;">
+            <input id="alarmIdInput" placeholder="输入 alarm_id 例如 al-0001" style="flex:1;min-width:140px;border:1px solid var(--line);border-radius:7px;padding:8px;" />
+            <button id="alarmMatchBtn" class="ghost">告警匹配</button>
+            <button id="alarmImpactBtn" class="ghost">影响范围</button>
+            <button id="alarmDiagnosisBtn" class="primary">告警诊断</button>
+          </div>
+          <div id="alarmDiagResult" style="margin-bottom:12px;"></div>
+          <div id="logs"></div>
         </div>
       </section>
-      <section class="panel logs">
-        <div class="panel-head"><h2>执行审计</h2><button id="loadLogsBtn" class="ghost">刷新日志</button></div>
-        <div id="logs" class="panel-body"></div>
-      </section>
+      </div>
     </main>
   </div>
   <dialog id="postmortemDialog">
-    <div class="panel-head"><h2>自动复盘报告</h2><button id="closeDialogBtn">关闭</button></div>
+    <div class="panel-head"><h2>自动复盘报告</h2><button id="closeDialogBtn" type="button">关闭</button></div>
     <div id="postmortemBody" class="modal-body"></div>
   </dialog>
   <div id="toast" class="status-line"></div>
@@ -335,13 +390,54 @@
 
     function bindEvents() {
       $('refreshBtn').onclick = refreshAll;
+      $('loadDataBtn').onclick = loadDataSummary;
       $('diagnoseBtn').onclick = runDiagnosis;
       $('postmortemBtn').onclick = createPostmortem;
       $('loadScriptsBtn').onclick = loadScripts;
       $('loadLogsBtn').onclick = loadLogs;
+      $('alarmMatchBtn').onclick = loadAlarmMatch;
+      $('alarmImpactBtn').onclick = loadAlarmImpact;
+      $('alarmDiagnosisBtn').onclick = runAlarmDiagnosis;
       $('sendDiscussionBtn').onclick = sendDiscussion;
       $('askCopilotBtn').onclick = askCopilot;
       $('closeDialogBtn').onclick = () => $('postmortemDialog').close();
+
+      const postmortemDialog = $('postmortemDialog');
+      if (postmortemDialog) {
+        const header = postmortemDialog.querySelector('.panel-head');
+        let isDragging = false;
+        let dragStartX = 0;
+        let dragStartY = 0;
+        let dialogStartLeft = 0;
+        let dialogStartTop = 0;
+
+        header?.addEventListener('pointerdown', (event) => {
+          if (event.target instanceof HTMLElement && event.target.closest('#closeDialogBtn')) {
+            return;
+          }
+          isDragging = true;
+          dragStartX = event.clientX;
+          dragStartY = event.clientY;
+          const rect = postmortemDialog.getBoundingClientRect();
+          dialogStartLeft = rect.left;
+          dialogStartTop = rect.top;
+          postmortemDialog.style.transform = 'none';
+          postmortemDialog.style.left = `${rect.left}px`;
+          postmortemDialog.style.top = `${rect.top}px`;
+          header.setPointerCapture(event.pointerId);
+        });
+
+        window.addEventListener('pointermove', (event) => {
+          if (!isDragging) return;
+          postmortemDialog.style.left = `${dialogStartLeft + event.clientX - dragStartX}px`;
+          postmortemDialog.style.top = `${dialogStartTop + event.clientY - dragStartY}px`;
+        });
+
+        window.addEventListener('pointerup', () => {
+          isDragging = false;
+        });
+      }
+
       $('userSelect').onchange = (event) => {
         state.userId = event.target.value;
         renderHeader();
@@ -367,6 +463,84 @@
       state.users = data.users || [];
       $('userSelect').innerHTML = state.users.map(u => `<option value="${esc(u.user_id)}">${esc(u.name)} · ${esc(u.role)}</option>`).join('');
       $('userSelect').value = state.userId;
+    }
+
+    async function loadDataSummary() {
+      try {
+        const summary = await api('/data/summary');
+        $('alarmDiagResult').innerHTML = `
+          <div class="card">
+            <strong>数据载入摘要</strong>
+            <p class="muted">系统关系 ${summary.system_relations}, 应用登记 ${summary.application_registry}, 告警记录 ${summary.alarm_records}, 复盘报告 ${summary.postmortem_reports}</p>
+            <p class="muted">源文件：${Object.entries(summary.source_files).map(([key, files]) => `${esc(key)} ${files.join(', ')}`).join(' | ')}</p>
+          </div>
+        `;
+      } catch (err) {
+        toast('数据摘要获取失败：' + err.message);
+      }
+    }
+
+    function renderAlarmDiagResult(title, details) {
+      $('alarmDiagResult').innerHTML = `
+        <div class="card asset">
+          <strong>${esc(title)}</strong>
+          ${details.map(line => `<p class="muted">${esc(line)}</p>`).join('')}
+        </div>
+      `;
+    }
+
+    async function loadAlarmMatch() {
+      const alarmId = $('alarmIdInput').value.trim();
+      if (!alarmId) {
+        toast('请先输入告警 ID');
+        return;
+      }
+      try {
+        const data = await api(`/alarm/${encodeURIComponent(alarmId)}/match`);
+        renderAlarmDiagResult('告警系统匹配结果', [
+          `匹配系统: ${data.matched_systems.map(s => s.name || s.id).join(', ') || '无'}`,
+          `负责人: ${data.owners.join(', ') || '未识别'}`,
+          `匹配文本: ${data.match_text || '无'}`
+        ]);
+      } catch (err) {
+        toast('告警匹配失败：' + err.message);
+      }
+    }
+
+    async function loadAlarmImpact() {
+      const alarmId = $('alarmIdInput').value.trim();
+      if (!alarmId) {
+        toast('请先输入告警 ID');
+        return;
+      }
+      try {
+        const data = await api(`/alarm/${encodeURIComponent(alarmId)}/impact`);
+        renderAlarmDiagResult('告警影响范围', [
+          `根系统: ${data.root_systems?.join(', ') || '无'}`,
+          `影响节点: ${data.affected_node_ids?.join(', ') || '无'}`,
+          `路径数量: ${data.paths?.length || 0}`
+        ]);
+      } catch (err) {
+        toast('影响范围查询失败：' + err.message);
+      }
+    }
+
+    async function runAlarmDiagnosis() {
+      const alarmId = $('alarmIdInput').value.trim();
+      if (!alarmId) {
+        toast('请先输入告警 ID');
+        return;
+      }
+      try {
+        const diag = await api(`/diagnosis/alarm/${encodeURIComponent(alarmId)}`);
+        renderAlarmDiagResult('告警自动诊断', [
+          `根因候选: ${(diag.root_cause_candidates || []).map(c => `${c.cause}(${Math.round((c.confidence||0)*100)}%)`).join('；')}`,
+          `匹配系统: ${(diag.matched_systems || []).map(s => s.name||s.id).join(', ') || '无'}`,
+          `负责人: ${(diag.owners || []).join(', ') || '未识别'}`
+        ]);
+      } catch (err) {
+        toast('告警诊断失败：' + err.message);
+      }
     }
 
     async function loadIncidents(selectFirst = true) {
@@ -568,6 +742,10 @@
           <div>${esc(msg.message)}</div>
         </div>
       `).join('') || '<div class="muted">暂无讨论消息。</div>';
+      const container = $('messages');
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
 
     async function sendDiscussion() {
@@ -670,7 +848,160 @@
       await refreshAll();
     }
 
-    boot().catch(err => {
+      function initLayoutResizers() {
+        const main = document.querySelector('main');
+        if (!main) return;
+        const res1 = $('col-resizer-1');
+        const res2 = $('col-resizer-2');
+        const splitter = $('workspace-splitter');
+        const scriptsResizer = $('scripts-row-resizer');
+        const logsResizer = $('logs-row-resizer');
+        const discussionPanel = document.querySelector('.discussion');
+        const logsPanel = document.querySelector('.logs');
+        const scriptsPanel = $('scriptsSection');
+        const logsSection = $('logsSection');
+        const left = document.querySelector('.context');
+        const center = document.querySelector('.workspace');
+        const rightCol = document.querySelector('.right-col');
+
+        let dragging = null;
+        let startX = 0;
+        let startWidths = null;
+
+        function getWidths() {
+          const l = left.getBoundingClientRect().width;
+          const c = center.getBoundingClientRect().width;
+          const r = rightCol?.getBoundingClientRect().width || 0;
+          return { l, c, r };
+        }
+
+        function onColPointerDown(e, idx) {
+          e.preventDefault();
+          dragging = idx;
+          startX = e.clientX;
+          startWidths = getWidths();
+          window.addEventListener('pointermove', onColPointerMove);
+          window.addEventListener('pointerup', onColPointerUp, { once: true });
+        }
+
+        function onColPointerMove(e) {
+          if (!dragging || !startWidths) return;
+          const dx = e.clientX - startX;
+          if (dragging === 1) {
+            const nl = Math.max(160, startWidths.l + dx);
+            const nc = Math.max(280, startWidths.c - dx);
+            const nr = startWidths.r;
+            main.style.setProperty('--col1', nl + 'px');
+            main.style.setProperty('--col2', nc + 'px');
+            main.style.setProperty('--col3', nr + 'px');
+            updateCenterAutoWidth();
+          } else if (dragging === 2) {
+            const nl = startWidths.l;
+            const nc = Math.max(280, startWidths.c + dx);
+            const nr = Math.max(180, startWidths.r - dx);
+            main.style.setProperty('--col1', nl + 'px');
+            main.style.setProperty('--col2', nc + 'px');
+            main.style.setProperty('--col3', nr + 'px');
+            updateCenterAutoWidth();
+          }
+        }
+
+        function onColPointerUp() {
+          dragging = null;
+          startWidths = null;
+          window.removeEventListener('pointermove', onColPointerMove);
+        }
+
+        res1?.addEventListener('pointerdown', (e) => onColPointerDown(e, 1));
+        res2?.addEventListener('pointerdown', (e) => onColPointerDown(e, 2));
+
+        if (splitter) {
+          let splitDragging = false;
+          let splitStartX = 0;
+          let splitWidths = null;
+          const leftPanel = center.querySelector('section.panel:first-child');
+          const rightPanel = center.querySelector('section.panel:last-child');
+
+          function onSplitPointerDown(e) {
+            e.preventDefault();
+            splitDragging = true;
+            splitStartX = e.clientX;
+            splitWidths = {
+              left: leftPanel.getBoundingClientRect().width,
+              right: rightPanel.getBoundingClientRect().width
+            };
+            window.addEventListener('pointermove', onSplitPointerMove);
+            window.addEventListener('pointerup', onSplitPointerUp, { once: true });
+          }
+
+          function onSplitPointerMove(e) {
+            if (!splitDragging || !splitWidths) return;
+            const dx = e.clientX - splitStartX;
+            const newLeft = Math.max(220, splitWidths.left + dx);
+            const newRight = Math.max(220, splitWidths.right - dx);
+            document.documentElement.style.setProperty('--workspace-left', newLeft + 'px');
+            document.documentElement.style.setProperty('--workspace-right', newRight + 'px');
+          }
+
+          function onSplitPointerUp() {
+            splitDragging = false;
+            splitWidths = null;
+            window.removeEventListener('pointermove', onSplitPointerMove);
+          }
+
+          splitter.addEventListener('pointerdown', onSplitPointerDown);
+        }
+
+        function bindRowHandle(handle, targetElement, variableName, invert = false) {
+          if (!handle || !targetElement) return;
+          handle.addEventListener('pointerdown', (e) => {
+            if (e.target instanceof HTMLElement && e.target.closest('button, a, input, textarea, select')) return;
+            e.preventDefault();
+            handle.setPointerCapture?.(e.pointerId);
+            const startY = e.clientY;
+            const startHeight = parseFloat(getComputedStyle(targetElement).getPropertyValue(variableName)) || targetElement.getBoundingClientRect().height;
+            const parentRect = targetElement === center ? main.getBoundingClientRect() : rightCol.getBoundingClientRect();
+            const minHeight = 120;
+            const maxHeight = Math.max(minHeight, parentRect.height - 120);
+            function onMove(ev) {
+              const dy = ev.clientY - startY;
+              const proposed = startHeight + (invert ? -dy : dy);
+              const newHeight = Math.min(maxHeight, Math.max(minHeight, proposed));
+              targetElement.style.setProperty(variableName, newHeight + 'px');
+              updateCenterAutoWidth();
+            }
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', () => { window.removeEventListener('pointermove', onMove); }, { once: true });
+          });
+        }
+
+        function updateCenterAutoWidth() {
+          if (!main || !left || !rightCol) return;
+          const mainRect = main.getBoundingClientRect();
+          const leftWidth = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--col1')) || left.getBoundingClientRect().width;
+          const rightWidth = rightCol.getBoundingClientRect().width;
+          const available = Math.max(420, mainRect.width - leftWidth - rightWidth - 24);
+          document.documentElement.style.setProperty('--col2', available + 'px');
+        }
+
+        bindRowHandle(scriptsResizer, center, '--workspace-bottom');
+        bindRowHandle(logsResizer, rightCol, '--right-bottom');
+        bindRowHandle(scriptsPanel?.querySelector('.panel-head'), center, '--workspace-bottom', true);
+        bindRowHandle(logsSection?.querySelector('.panel-head'), rightCol, '--right-bottom', true);
+
+        if (window.ResizeObserver) {
+          if (rightCol) new ResizeObserver(() => updateCenterAutoWidth()).observe(rightCol);
+          if (discussionPanel) new ResizeObserver(() => updateCenterAutoWidth()).observe(discussionPanel);
+          if (logsPanel) new ResizeObserver(() => updateCenterAutoWidth()).observe(logsPanel);
+        }
+
+        window.addEventListener('resize', updateCenterAutoWidth);
+        updateCenterAutoWidth();
+      }
+
+      initLayoutResizers();
+
+      boot().catch(err => {
       console.error(err);
       toast('启动失败：请确认后端服务已运行在 8000 端口');
     });

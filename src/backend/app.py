@@ -3,16 +3,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import json
 import uuid
 import os
 import datetime
 
 from .reasoner import IncidentReasoner
+from .data_service import DataService
+from .knowledge_graph import KnowledgeGraph
+from .alarm_analyze import AlarmAnalyzer
+from .fault_diagnosis import FaultDiagnosisService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_ROOT = os.path.abspath(os.path.join(HERE, '..'))
+DATA_SERVICE = DataService(DATA_ROOT)
+KG_SERVICE = KnowledgeGraph(DATA_SERVICE.system_relations, DATA_SERVICE.application_registry)
 
 app = FastAPI(title="IntelliOps Prototype API")
 
@@ -401,7 +407,7 @@ def _related_incidents(incident_id: str) -> List[Dict[str, Any]]:
     return [INCIDENTS[i] for i in related_ids]
 
 
-def _validate_ontology_payload(payload: Any) -> (bool, List[str]):
+def _validate_ontology_payload(payload: Any) -> Tuple[bool, List[str]]:
     errors: List[str] = []
     if not isinstance(payload, dict):
         return False, ['Ontology payload must be a JSON object']
@@ -759,6 +765,46 @@ async def kg_history(service_id: str = '', alert_id: str = '', change_id: str = 
         'query': {'service_id': service_id, 'alert_id': alert_id, 'change_id': change_id},
         'incidents': _history_incidents(service_id=service_id, alert_id=alert_id, change_id=change_id)
     }
+
+@app.get('/data/summary')
+async def get_data_summary():
+    return DATA_SERVICE.summary()
+
+@app.post('/data/reload')
+async def reload_data():
+    summary = DATA_SERVICE.reload()
+    global KG_SERVICE
+    KG_SERVICE = KnowledgeGraph(DATA_SERVICE.system_relations, DATA_SERVICE.application_registry)
+    return {'status': 'reloaded', 'summary': summary}
+
+@app.get('/alarm/{alarm_id}')
+async def get_alarm_record(alarm_id: str):
+    alarm = DATA_SERVICE.get_alarm_by_id(alarm_id)
+    if not alarm:
+        raise HTTPException(status_code=404, detail='alarm not found')
+    return alarm
+
+@app.get('/alarm/{alarm_id}/match')
+async def get_alarm_match(alarm_id: str):
+    alarm = DATA_SERVICE.get_alarm_by_id(alarm_id)
+    if not alarm:
+        raise HTTPException(status_code=404, detail='alarm not found')
+    return AlarmAnalyzer.match_alarm_to_systems(alarm, DATA_SERVICE, KG_SERVICE)
+
+@app.get('/alarm/{alarm_id}/impact')
+async def get_alarm_impact(alarm_id: str, depth: int = 2):
+    alarm = DATA_SERVICE.get_alarm_by_id(alarm_id)
+    if not alarm:
+        raise HTTPException(status_code=404, detail='alarm not found')
+    match_info = AlarmAnalyzer.match_alarm_to_systems(alarm, DATA_SERVICE, KG_SERVICE)
+    return KG_SERVICE.impact_scope(match_info.get('system_ids', []), max_hops=depth)
+
+@app.get('/diagnosis/alarm/{alarm_id}')
+async def diagnose_alarm(alarm_id: str, depth: int = 2):
+    try:
+        return FaultDiagnosisService.diagnose_alarm(alarm_id, DATA_SERVICE, KG_SERVICE, depth)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 @app.get('/auth/users')
 async def list_users():
@@ -1219,6 +1265,12 @@ async def root():
             "/postmortem/{id}",
             "/incident/{id}/related-cases",
             "/incident/{id}/knowledge-assets",
+            "/data/summary",
+            "/data/reload",
+            "/alarm/{alarm_id}",
+            "/alarm/{alarm_id}/match",
+            "/alarm/{alarm_id}/impact",
+            "/diagnosis/alarm/{alarm_id}",
             "/ui/"
         ]
     }

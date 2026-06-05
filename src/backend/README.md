@@ -53,6 +53,12 @@ API 示例：
 - `POST /postmortem/{id}/approve` 审批并发布复盘
 - `GET /incident/{id}/related-cases` 查询相似历史案例
 - `GET /incident/{id}/knowledge-assets` 查询关联知识资产
+- `GET /data/summary` 查询已加载数据摘要
+- `POST /data/reload` 重新加载 data 目录数据
+- `GET /alarm/{alarm_id}` 查询告警记录及解析结果
+- `GET /alarm/{alarm_id}/match` 告警系统与负责人匹配
+- `GET /alarm/{alarm_id}/impact` 计算告警影响范围
+- `GET /diagnosis/alarm/{alarm_id}` 执行告警自动诊断
 - `GET /ui/` 访问前端原型页面
 
 缺失/待补充后端能力：
