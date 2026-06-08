@@ -1,15 +1,15 @@
-﻿"""
-Skill Updater — dynamically injects mature knowledge patterns into SKILL.md files.
+"""
+Skill Updater — dynamically injects mature solution summaries and practices into SKILL.md files.
 
-When a pattern reaches high confidence and appears frequently enough, this module:
-  1. Updates the corresponding `references/root-cause-patterns.md` with new patterns.
-  2. Updates `references/correlation-rules.md` or `references/error-patterns.md`.
+When a solution summary reaches high frequency (N source incidents), this module:
+  1. Updates the corresponding `references/solution-practices.md` with the authoritative solution.
+  2. Updates `references/runbooks/` or `references/error-patterns.md`.
   3. For fully automated SOPs, generates an auto-remediation SKILL.md so the AI
      can autonomously handle future occurrences.
   4. Keeps a changelog of what was updated and when.
 
 This turns "high-frequency alert knowledge" into living documentation that the
-AI agent loads automatically on next invocation.
+AI agent loads automatically on next invocation — eliminating repeated knowledge accumulation.
 """
 
 from __future__ import annotations
@@ -33,8 +33,9 @@ SKILL_BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skil
 # Ref file updaters
 # ---------------------------------------------------------------------------
 
-def _append_to_ref_file(ref_path: str, section_title: str, content_md: str) -> bool:
-    """Append a new section to a reference markdown file. Creates file if missing."""
+
+def _append_or_update_ref_file(ref_path: str, section_title: str, content_md: str) -> bool:
+    """Append a new section or update existing section in a reference markdown file."""
     try:
         os.makedirs(os.path.dirname(ref_path), exist_ok=True)
         if os.path.exists(ref_path):
@@ -44,28 +45,19 @@ def _append_to_ref_file(ref_path: str, section_title: str, content_md: str) -> b
 
         header = f"\n\n## {section_title}\n\n*自动生成于 {datetime.utcnow().isoformat()}*\n\n"
 
-        # Avoid duplicate entries (match based on section title)
         if f"## {section_title}" in existing:
-            # Update existing section
             lines = existing.split("\n")
             new_lines = []
-            skip = False
             in_section = False
-            section_depth = 0
             for line in lines:
                 if line.startswith(f"## {section_title}"):
                     in_section = True
-                    section_depth = 0
-                    skip = True
                     continue
                 if in_section:
                     if line.startswith("## "):
-                        # Next top-level heading — stop skipping
                         in_section = False
-                        skip = False
                         new_lines.append(line)
                         continue
-                    # Skip lines within the old section
                     continue
                 new_lines.append(line)
             existing = "\n".join(new_lines).rstrip() + header + content_md
@@ -89,78 +81,133 @@ def _create_auto_remediation_skill(
 
     Returns the skill directory name if created.
     """
-    if asset_type != "sop_templates" and asset_type != "root_cause_rules":
-        return None
+    if asset_type == "solution_summaries":
+        # Check if auto_remediation_script is present and meaningful
+        script = pattern.get("auto_remediation_script", "")
+        if not script or not isinstance(script, str) or len(script.strip()) < 10:
+            return None
 
-    readiness = pattern.get("auto_remediation_readiness", 0)
-    if readiness < 0.7:
-        return None  # not automatable enough
+        problem = pattern.get("problem", "auto-remediation")
+        safe_name = _slugify(f"auto-{problem[:30]}")
+        skill_dir = os.path.join(SKILL_BASE, safe_name)
 
-    pattern_label = pattern.get("canonical_pattern", pattern.get("pattern", "auto-remediation"))
-    safe_name = _slugify(f"auto-{pattern_label[:30]}")
-    skill_dir = os.path.join(SKILL_BASE, safe_name)
+        if os.path.exists(skill_dir):
+            logger.info("Auto-remediation skill already exists: %s", safe_name)
+            return safe_name
 
-    if os.path.exists(skill_dir):
-        logger.info("Auto-remediation skill already exists: %s", safe_name)
-        return safe_name
+        key_points = pattern.get("key_points", [])
+        scenario = pattern.get("scenario", [])
+        verification = pattern.get("verification", "")
+        solution = pattern.get("solution", "")
 
-    conditions = pattern.get("merged_conditions", pattern.get("conditions", []))
-    steps = []
-    if asset_type == "sop_templates":
-        merged_sop = pattern.get("_aggregated_sop", {})
-        steps = merged_sop.get("steps", pattern.get("steps", []))
-    else:
-        # For root cause patterns, generate diagnostic + remediation steps
-        steps = [
-            f"检测到触发条件：{'、'.join(conditions[:3])}",
-            "自动执行诊断脚本收集指标数据",
-            "确认故障模式与已知模式匹配",
-            "执行标准处置流程（自动审批）",
-            "验证服务恢复状态",
-            "生成处置报告",
-        ]
-
-    trigger_keywords = [f"自动处置", f"自愈", f"{pattern_label}"]
-    if conditions:
-        trigger_keywords.extend(c[:20] for c in conditions[:3])
-
-    skill_md = f"""---
+        skill_md = f"""---
 name: {safe_name}
 description: >
-  自动处置：{pattern_label}。触发词：{'、'.join(trigger_keywords)}。
-  使用场景：检测到匹配已知高频模式时，自动执行标准处置流程。
+  自动处置：{problem}。使用场景：{'、'.join(scenario[:3])}。
+  当检测到匹配的高频告警模式时，自动执行标准处置流程。
 argument-hint: '<incident_id>'
 user-invocable: false
 disable-model-invocation: false
 ---
 
-# 自动处置：{pattern_label}
-
-## 自动化就绪度
-{readiness:.0%}
+# 自动处置：{problem}
 
 ## 来源
 聚合自 {pattern.get('_source_count', pattern.get('count', 1))} 个历史 incident。
 
-## 处置步骤
-{chr(10).join(f'{i+1}. {step}' for i, step in enumerate(steps))}
+## 问题描述
+{problem}
 
-## 触发条件
-{chr(10).join(f'- {c}' for c in conditions)}
+## 处置方案
+{solution}
+
+## 处置要点
+{chr(10).join(f'- {kp}' for kp in key_points)}
+
+## 验证方法
+{verification}
+
+## 自动处置脚本
+```bash
+{script}
+```
+
+## 使用场景
+{chr(10).join(f'- {s}' for s in scenario)}
 
 ## 参考
-- [根因模式库](./references/root-cause-patterns.md)
+- [解决方案实践库](./references/solution-practices.md)
 """
 
-    try:
-        os.makedirs(skill_dir, exist_ok=True)
-        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
-            f.write(skill_md)
-        logger.info("Created auto-remediation skill: %s", safe_name)
-        return safe_name
-    except Exception as e:
-        logger.error("Failed to create auto-remediation skill %s: %s", safe_name, e)
-        return None
+        try:
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(skill_md)
+            logger.info("Created auto-remediation skill: %s", safe_name)
+            return safe_name
+        except Exception as e:
+            logger.error("Failed to create auto-remediation skill %s: %s", safe_name, e)
+            return None
+
+    elif asset_type == "sop_templates":
+        steps = pattern.get("steps", [])
+        if len(steps) < 2:
+            return None
+
+        title = pattern.get("title", "auto-sop")
+        safe_name = _slugify(f"sop-{title[:30]}")
+        skill_dir = os.path.join(SKILL_BASE, safe_name)
+
+        if os.path.exists(skill_dir):
+            logger.info("SOP skill already exists: %s", safe_name)
+            return safe_name
+
+        key_points = pattern.get("key_points", [])
+        scenario = pattern.get("scenario", [])
+        verification_method = pattern.get("verification_method", "")
+
+        skill_md = f"""---
+name: {safe_name}
+description: >
+  自动处置 SOP：{title}。使用场景：{'、'.join(scenario[:3])}。
+  标准操作流程，可自动执行。
+argument-hint: '<incident_id>'
+user-invocable: false
+disable-model-invocation: false
+---
+
+# 自动处置 SOP：{title}
+
+## 来源
+聚合自 {pattern.get('_source_count', pattern.get('count', 1))} 个历史 incident。
+
+## 操作步骤
+{chr(10).join(f'{i+1}. {step}' for i, step in enumerate(steps))}
+
+## 处置要点
+{chr(10).join(f'- {kp}' for kp in key_points)}
+
+## 验证方法
+{verification_method}
+
+## 使用场景
+{chr(10).join(f'- {s}' for s in scenario)}
+
+## 参考
+- [解决方案实践库](./references/solution-practices.md)
+"""
+
+        try:
+            os.makedirs(skill_dir, exist_ok=True)
+            with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+                f.write(skill_md)
+            logger.info("Created SOP skill: %s", safe_name)
+            return safe_name
+        except Exception as e:
+            logger.error("Failed to create SOP skill %s: %s", safe_name, e)
+            return None
+
+    return None
 
 
 def _slugify(text: str) -> str:
@@ -179,10 +226,10 @@ def _slugify(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 SKILL_REF_MAP: Dict[str, str] = {
-    "root_cause_rules": os.path.join(SKILL_BASE, "incident-diagnosis", "references", "root-cause-patterns.md"),
-    "warning_signals": os.path.join(SKILL_BASE, "incident-diagnosis", "references", "diagnosis-api.md"),
-    "sop_templates": os.path.join(SKILL_BASE, "script-operations", "references", "risk-matrix.md"),
-    "script_recommendations": os.path.join(SKILL_BASE, "script-operations", "references", "risk-matrix.md"),
+    "solution_summaries": os.path.join(SKILL_BASE, "incident-diagnosis", "references", "solution-practices.md"),
+    "sop_templates": os.path.join(SKILL_BASE, "script-operations", "references", "sop-library.md"),
+    "warning_signals": os.path.join(SKILL_BASE, "incident-diagnosis", "references", "warning-signals.md"),
+    "script_recommendations": os.path.join(SKILL_BASE, "script-operations", "references", "script-library.md"),
 }
 
 
@@ -198,7 +245,7 @@ async def update_skill_refs(
     """
     result: Dict[str, Any] = {
         "asset_type": asset_type,
-        "pattern_key": pattern.get("canonical_pattern", pattern.get("pattern", "")),
+        "pattern_key": pattern.get("problem", pattern.get("pattern", pattern.get("title", ""))),
         "ref_files_updated": [],
         "auto_skill_created": None,
     }
@@ -206,33 +253,46 @@ async def update_skill_refs(
     # 1. Update reference files
     ref_path = SKILL_REF_MAP.get(asset_type)
     if ref_path and os.path.exists(os.path.dirname(ref_path)):
-        pattern_text = pattern.get("canonical_pattern", pattern.get("pattern", ""))
-        if not pattern_text:
-            pattern_text = pattern.get("title", pattern.get("name", ""))
+        problem_text = pattern.get("problem", pattern.get("pattern", pattern.get("title", "")))
+        if not problem_text:
+            problem_text = pattern.get("title", pattern.get("name", ""))
 
-        # Build markdown content
-        md_lines = [f"- **{pattern_text}** (来源: {source_count} 个 incident, 自动化就绪度: {pattern.get('auto_remediation_readiness', 0):.0%})"]
+        md_lines = [
+            f"- **{problem_text}** (来源: {source_count} 个 incident)"
+        ]
 
-        conditions = pattern.get("merged_conditions", pattern.get("conditions", []))
-        if conditions:
-            md_lines.append("  - 触发条件：")
-            for c in conditions:
-                md_lines.append(f"    - {c}")
+        solution = pattern.get("solution", "")
+        if solution:
+            md_lines.append(f"  - 解决方法：{solution[:200]}")
 
-        calibrations = pattern.get("threshold_calibrations", [])
-        if calibrations:
-            md_lines.append("  - 监控阈值建议：")
-            for cal in calibrations:
-                md_lines.append(f"    - {cal.get('metric', '')}: {cal.get('current_threshold', '')} → {cal.get('suggested_threshold', '')}")
+        key_points = pattern.get("key_points", [])
+        if key_points:
+            md_lines.append("  - 处置要点：")
+            for kp in key_points:
+                md_lines.append(f"    - {kp}")
+
+        scenario = pattern.get("scenario", [])
+        if scenario:
+            md_lines.append("  - 使用场景：")
+            for sc in scenario:
+                md_lines.append(f"    - {sc}")
+
+        verification = pattern.get("verification", pattern.get("verification_method", ""))
+        if verification:
+            md_lines.append(f"  - 验证方法：{verification[:200]}")
+
+        script = pattern.get("auto_remediation_script", "")
+        if script:
+            md_lines.append(f"  - 自动处置脚本：\n```bash\n{script[:300]}\n```")
 
         content_md = "\n".join(md_lines)
-        section_title = f"高频模式 - {pattern_text[:40]}"
+        section_title = f"实践总结 - {problem_text[:40]}"
 
-        ok = _append_to_ref_file(ref_path, section_title, content_md)
+        ok = _append_or_update_ref_file(ref_path, section_title, content_md)
         if ok:
             result["ref_files_updated"].append(ref_path)
 
-    # 2. Create auto-remediation skill if readiness is high enough
+    # 2. Create auto-remediation skill if applicable
     auto_skill = _create_auto_remediation_skill(pattern, asset_type)
     if auto_skill:
         result["auto_skill_created"] = auto_skill
@@ -245,13 +305,11 @@ async def update_all_mature_patterns() -> List[Dict[str, Any]]:
     Scan for all high-frequency patterns and update skill refs for them.
     Called periodically or after pattern aggregation.
     """
-    from .pattern_aggregator import find_high_frequency_patterns
+    from .pattern_aggregator import find_high_frequency_patterns, aggregate_and_refine
 
     patterns = await find_high_frequency_patterns()
     results = []
     for pattern in patterns:
-        # First, run aggregation if not already done
-        from .pattern_aggregator import aggregate_and_refine
         refined = await aggregate_and_refine(
             asset_type=pattern["asset_type"],
             items=pattern["items"],
