@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "updatedAt": "2026-06-06T00:00:00Z",
+  "product": {
+    "name": "IntelliOps",
+    "title": "大模型驱动的应急认知原型",
+    "goal": "验证大模型能否真正参与故障认知过程，从辅助工具升级为应急认知协同体",
+    "targetUsers": ["值班运维", "开发负责人", "审批经理"],
+    "scope": "原型研发，两人并行迭代"
+  },
+  "architecture": {
+    "layers": [
+      {
+        "name": "数据层",
+        "goal": "多源数据打通与标准化",
+        "modules": ["data_service", "knowledge_graph", "alarm_analyze", "fault_diagnosis"],
+        "dataSources": ["T-CMDB", "T-OPM", "优云导出", "变更清单", "工单系统", "Excel/Word本地文件"]
+      },
+      {
+        "name": "知识层",
+        "goal": "知识库检索、向量索引、本体规范",
+        "modules": ["vector_search", "ontology/validator", "kg/sample_kg"],
+        "capabilities": ["embedding检索", "KG子图查询", "本体校验"]
+      },
+      {
+        "name": "能力层",
+        "goal": "根因推理、自动执行、协同联动",
+        "modules": ["reasoner", "log_analyzer", "copilot", "credibility", "knowledge_distiller", "skill/"],
+        "capabilities": ["LLM根因推理", "日志智能分析", "多轮诊断对话", "可信度评估", "知识蒸馏"]
+      },
+      {
+        "name": "应用层",
+        "goal": "事故看板、排查助手、复盘闭环",
+        "modules": ["ui/index.html", "websocket_manager", "state_machine"],
+        "capabilities": ["War Room工作间", "实时推送", "排查状态跟踪", "复盘报告生成"]
+      }
+    ],
+    "infrastructure": ["db.py (SQLite)", "llm_client.py (多provider)", "models.py (Pydantic)"]
+  },
+  "userStories": [
+    {
+      "id": "US-01",
+      "title": "故障自动诊断",
+      "description": "运维人员接入故障后，Copilot自动收集日志、告警、变更信息，进行多候选根因推理并推荐排查步骤"
+    },
+    {
+      "id": "US-02",
+      "title": "多轮协同诊断",
+      "description": "运维人员与Copilot进行多轮对话，逐步补充证据、更新根因假设、引导排查方向"
+    },
+    {
+      "id": "US-03",
+      "title": "脚本安全执行",
+      "description": "根据诊断结果推荐诊断/处置脚本，支持dry-run预检、风险分级、审批流程、执行审计"
+    },
+    {
+      "id": "US-04",
+      "title": "知识检索与复用",
+      "description": "查询知识图谱获取服务依赖、历史案例、SOP模板，向量检索相似故障"
+    },
+    {
+      "id": "US-05",
+      "title": "多人War Room协同",
+      "description": "运维/开发/Copilot在同一工作间实时讨论，WebSocket推送状态变更，角色自动通知"
+    },
+    {
+      "id": "US-06",
+      "title": "自动复盘与知识沉淀",
+      "description": "故障恢复后自动生成复盘报告（时间线+根因+决策+脚本），蒸馏为可复用知识资产"
+    }
+  ],
+  "integrationPoints": [
+    "POST /copilot/diagnose — 诊断会话启动",
+    "POST /copilot/chat — 多轮对话",
+    "GET /script/suggest — 脚本推荐",
+    "POST /script/execute — 脚本执行",
+    "WS /ws/incident/{id} — 实时推送",
+    "POST /incident/{id}/postmortem — 复盘生成",
+    "GET /postmortem/{id}/knowledge — 知识蒸馏"
+  ],
+  "completionStatus": {
+    "personA": "6/6 完成",
+    "personB": "7/8 完成 (B7前端待开始)",
+    "totalEndpoints": 50,
+    "backendModules": 16
+  }
+}

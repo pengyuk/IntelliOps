@@ -1,0 +1,100 @@
+{
+  "version": 1,
+  "generatedAt": "2026-06-06T00:00:00Z",
+  "sourceOfTruth": {
+    "prd": "prd.json",
+    "architecture": ".harness-runner/repository-architecture.md"
+  },
+  "technologySummary": [
+    "Python 3.12+ (FastAPI, uvicorn)",
+    "JavaScript (vanilla, no framework - React migration planned in B7)",
+    "SQLite (aiosqlite, WAL mode)",
+    "LLM: OpenAI >=1.0.0 / Anthropic / Ollama (httpx)",
+    "Vector: sentence-transformers + FAISS (optional), TF-IDF fallback",
+    "Data: pandas, openpyxl, xlrd, python-docx",
+    "Deploy: Docker (Python 3.12-slim), docker-compose"
+  ],
+  "buildCommands": [
+    "pip install -r requirements.txt"
+  ],
+  "verificationCommands": [
+    "python -c \"from src.backend.app import app; print('OK')\"",
+    "python -c \"from src.backend.db import get_db; print('DB OK')\""
+  ],
+  "testCommands": [
+    "pytest src/ --ignore=src/ui/"
+  ],
+  "lintCommands": [
+    "ruff check src/backend/",
+    "pylint src/backend/ --disable=C0114,C0115,C0116"
+  ],
+  "styleRules": [
+    "模块职责单一：一个 .py 文件只负责一个明确的功能领域",
+    "app.py 只包含路由注册和全局初始化，业务逻辑提取到独立模块",
+    "Pydantic 模型统一放在 models.py，不在 app.py 中定义",
+    "使用 async/await 全链路（FastAPI + aiosqlite + LLM 调用）",
+    "中英文混用时，面向用户的输出使用中文，代码标识符使用英文",
+    "SKILL.md 文件使用中文 + YAML frontmatter（遵循 VS Code Copilot 规范）"
+  ],
+  "gitRules": [
+    "提交标题和描述必须使用中文",
+    "提交粒度：每个逻辑变更一个 commit，避免超大 commit",
+    "Person A 和 Person B 的变更分别提交，即使在同一文件上协作"
+  ],
+  "architectureRules": [
+    "Keep reusable logic in dedicated modules instead of duplicating it across the codebase",
+    "Prefer keeping entrypoints thin and moving reusable implementation details into focused modules",
+    "Current source subdirectories: backend, harness, kg, ontology, skill, ui",
+    "backend/ 采用扁平模块结构（16 .py 文件），暂不拆分子目录",
+    "KG 查询逻辑集中在 knowledge_graph.py，不散落在 app.py",
+    "Ontology 校验逻辑集中在 src/ontology/validator.py，不散落在 app.py",
+    "Skill 文件放在 src/skill/<name>/SKILL.md，每个 Skill 自包含",
+    "数据文件放在 data/ 目录，通过 data_service.py 统一加载"
+  ],
+  "allowedPaths": [
+    "src/**",
+    "docs/**",
+    "data/**",
+    "src/backend/**",
+    "src/harness/**",
+    "src/kg/**",
+    "src/ontology/**",
+    "src/skill/**",
+    "src/ui/**"
+  ],
+  "forbiddenPaths": [
+    ".idea/**",
+    ".git/**"
+  ],
+  "reuseHints": [
+    "调用 LLM 必须通过 llm_client.py（不要在其他模块中直接调用 openai/anthropic/httpx）",
+    "数据库操作必须通过 db.py（不要在其他模块中直接使用 aiosqlite）",
+    "Pydantic 模型从 models.py 导入（不要在其他文件中重复定义相同的模型）",
+    "图查询复用 knowledge_graph.py 的邻接表方法，不要自己写 BFS",
+    "日志分析复用 log_analyzer.py 的模式库，不要在其他地方重复定义错误正则",
+    "向量检索复用 vector_search.py 的单例 get_vector_search()",
+    "WebSocket 广播复用 websocket_manager.py 的 manager.broadcast()",
+    "前后端 API 契约参考 src/backend/README.md 中的端点列表"
+  ],
+  "deliveryChecklist": [
+    "所有 .py 文件导入无错误 (python -c 'from src.backend.app import app')",
+    "新端点已添加到 models.py（如需 Pydantic 模型）",
+    "新端点已添加到 app.py 根路由列表",
+    "新模块已在对应的 DESIGN.md 中记录",
+    "需求变更已更新 prd.json 的 userStories 或 architecture",
+    "提交使用中文 commit message",
+    "如修改模块边界，已重新生成 project-constraints.generated.json"
+  ],
+  "metadata": {
+    "hasReadme": true,
+    "hasPrd": true,
+    "sourceDirectories": ["backend", "harness", "kg", "ontology", "skill", "ui"],
+    "topLevelDirectories": [".git", ".github", ".harness-runner", ".idea", "data", "docs", "src"],
+    "harnessLanguage": "Chinese",
+    "completionStatus": {
+      "personA": "6/6 完成",
+      "personB": "7/8 完成",
+      "pendingTask": "B7 前端增强 (React + 图可视化)"
+    }
+  }
+}

@@ -1,5 +1,7 @@
 import math
+import os
 import re
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -8,11 +10,18 @@ import pandas as pd
 import xlrd
 from docx import Document
 
+# Suppress openpyxl default-style warning
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
 
 class DataService:
-    """Load, normalize and expose data from the project data directory."""
+    """Load, normalize and expose data from the project data directory.
 
-    def __init__(self, workspace_root: str):
+    Data loading is LAZY by default — call load_all() explicitly or set
+    EAGER_LOAD_DATA=1 to load on init. Properties auto-trigger load on first access.
+    """
+
+    def __init__(self, workspace_root: str, eager: bool = False):
         self.src_root = Path(workspace_root)
         self.data_root = self._resolve_data_root(self.src_root)
         self.system_relations: List[Dict[str, Any]] = []
@@ -21,7 +30,11 @@ class DataService:
         self.postmortem_reports: List[Dict[str, Any]] = []
         self._application_index: Dict[str, Dict[str, Any]] = {}
         self._system_index: Dict[str, Dict[str, Any]] = {}
-        self.load_all()
+        self._loaded = False
+
+        eager = eager or os.environ.get("EAGER_LOAD_DATA", "0") == "1"
+        if eager:
+            self.load_all()
 
     def _resolve_data_root(self, root: Path) -> Path:
         if root.name == 'data':
@@ -35,20 +48,41 @@ class DataService:
         raise FileNotFoundError(f'Cannot find data directory from workspace root: {root}')
 
     def load_all(self) -> None:
+        if self._loaded:
+            return
+        print("[DataService] Loading data files...")
+        print("[DataService]   → Loading system relations...")
         self.system_relations = self.load_system_relations()
+        print(f"[DataService]   ✓ {len(self.system_relations)} system relations loaded")
+        print("[DataService]   → Loading application registry...")
         self.application_registry = self.load_application_registry()
+        print(f"[DataService]   ✓ {len(self.application_registry)} applications loaded")
+        print("[DataService]   → Loading alarm records...")
         self.alarm_records = self.load_alarm_records()
+        print(f"[DataService]   ✓ {len(self.alarm_records)} alarm records loaded")
+        print("[DataService]   → Loading postmortem reports...")
         self.postmortem_reports = self.load_postmortems()
+        print(f"[DataService]   ✓ {len(self.postmortem_reports)} postmortem reports loaded")
+        print("[DataService]   → Building indexes...")
         self._application_index = self._build_application_index()
         self._system_index = self._build_system_index()
+        self._loaded = True
+        print(f"[DataService] ✓ All data loaded successfully")
+
+    def _ensure_loaded(self) -> None:
+        """Lazy-load data on first access if not already loaded."""
+        if not self._loaded:
+            self.load_all()
 
     def reload(self) -> Dict[str, Any]:
+        self._loaded = False
         self.load_all()
         return self.summary()
 
     def summary(self) -> Dict[str, Any]:
         return {
             'data_root': str(self.data_root),
+            'loaded': self._loaded,
             'system_relations': len(self.system_relations),
             'application_registry': len(self.application_registry),
             'alarm_records': len(self.alarm_records),
@@ -142,6 +176,7 @@ class DataService:
             return []
         relations: List[Dict[str, Any]] = []
         for path in sorted(folder.glob('*.xls')) + sorted(folder.glob('*.xlsx')):
+            print(f"[DataService]     Reading relations: {path.name} ...")
             if path.suffix.lower() == '.xls':
                 df = self._read_xls(path)
             else:
@@ -169,6 +204,7 @@ class DataService:
             return []
         applications: List[Dict[str, Any]] = []
         for path in sorted(folder.glob('*.xlsx')):
+            print(f"[DataService]     Reading app registry: {path.name} ...")
             workbook = pd.ExcelFile(path, engine='openpyxl')
             for sheet in workbook.sheet_names:
                 df = self._read_excel(path, sheet_name=sheet)
@@ -204,11 +240,13 @@ class DataService:
         for path in sorted(folder.glob('*')):
             if path.suffix.lower() not in {'.xls', '.xlsx', '.csv'}:
                 continue
+            print(f"[DataService]     Reading alarm file: {path.name} ...")
             if path.suffix.lower() == '.csv':
                 df = pd.read_csv(path, dtype=str, encoding='utf-8', keep_default_na=False)
             else:
                 df = self._read_excel(path)
             records = self._dataframe_to_records(df)
+            print(f"[DataService]     Parsed {len(records)} rows from {path.name}")
             for row in records:
                 alarm_record = {
                     'alarm_id': f'{path.stem}-{sequence:04d}',
@@ -255,7 +293,14 @@ class DataService:
             return []
         reports: List[Dict[str, Any]] = []
         for path in sorted(folder.glob('*.docx')):
-            document = Document(path)
+            if path.name.startswith('~$'):
+                continue  # skip Office temp files
+            print(f"[DataService]     Reading postmortem: {path.name} ...")
+            try:
+                document = Document(path)
+            except Exception as e:
+                print(f"[DataService]     ⚠ Skipping {path.name}: {e}")
+                continue
             paragraphs = [self._normalize_text(paragraph.text) for paragraph in document.paragraphs if self._normalize_text(paragraph.text)]
             content = '\n'.join(paragraphs)
             report = {
@@ -286,9 +331,11 @@ class DataService:
         return index
 
     def get_alarm_by_id(self, alarm_id: str) -> Optional[Dict[str, Any]]:
+        self._ensure_loaded()
         return next((alarm for alarm in self.alarm_records if alarm.get('alarm_id') == alarm_id), None)
 
     def search_postmortems(self, keywords: List[str]) -> List[Dict[str, Any]]:
+        self._ensure_loaded()
         lower_keywords = [keyword.lower() for keyword in keywords if keyword]
         matches: List[Dict[str, Any]] = []
         for report in self.postmortem_reports:

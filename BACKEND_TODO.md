@@ -1,8 +1,9 @@
 # 后端实现待办清单
 
-根据前端优化遇到的缺失功能整理。
+> **更新于 2026-06-06**：Person A 全部完成（6/6），Person B 完成 7/8。仅 B7 前端增强待开始。
+> 详细模块清单见 `src/backend/README.md`。
 
-## 优先级1: Copilot诊断与多轮对话（核心功能）
+## 优先级1: Copilot诊断与多轮对话 ✅ 已完成
 
 ### POST /copilot/diagnose
 **触发自动诊断**
@@ -33,7 +34,7 @@
 - 推荐具体工具或生成脚本
 - 在讨论区发消息时同步更新
 
-## 优先级2: 脚本生成与管理
+## 优先级2: 脚本生成与管理 ✅ 已完成 ✅ 已完成
 
 ### GET /script/suggest
 **推荐脚本**
@@ -63,7 +64,7 @@
 **获取脚本详情**
 - 返回：脚本代码、风险等级、审批状态、执行历史
 
-## 优先级3: 讨论区与多角色沟通
+## 优先级3: 讨论区与多角色沟通 ✅ 已完成 ✅ 已完成
 
 ### POST /incident/{id}/discussion
 **发送讨论消息**（已有`/collaboration`，需扩展）
@@ -76,7 +77,7 @@
 - 分页、搜索、类型筛选
 - 包含@提及关系
 
-## 优先级4: 自动复盘与知识积累
+## 优先级4: 自动复盘与知识积累 ✅ 已完成 ✅ 已完成
 
 ### POST /incident/{id}/postmortem
 **触发自动复盘生成**
@@ -104,7 +105,7 @@
 - 选择脚本是否永久化
 - 决策是否转为改进任务
 
-## 优先级5: 故障诊断上下文补充
+## 优先级5: 故障诊断上下文补充 ✅ 已完成 ✅ 已完成
 
 ### GET /incident/{id}/related-cases
 **获取相似案例**（需增强）
@@ -117,7 +118,7 @@
 - SOP文档、脚本库、变更记录
 - 按相关度排序
 
-## 优先级6: LLM集成（如果已有LLM服务）
+## 优先级6: LLM集成 ✅ 已完成
 
 ### 外部LLM配置
 - 根因推理LLM
@@ -128,35 +129,39 @@
 
 ---
 
-## 当前已实现的（不需要改动）
+## 当前实现状态（2026-06-06）
 
-✅ `/incidents` - 事故列表
-✅ `/incident/{id}` - 事故详情
-✅ `/incident/{id}/timeline` - 时间线
-✅ `/incident/{id}/collaboration` - 评论（需扩展为讨论）
-✅ `/kg/incident/{id}` - KG子图
-✅ `/action/request` - 动作请求
-✅ `/action/approve` - 动作审批
-✅ `/action/execute` - 动作执行
-✅ `/auth/users` - 用户管理
+### 后端模块（18 文件，零编译错误）
 
----
+| 文件 | 所属 | 功能 |
+|------|------|------|
+| `models.py` | API | 17 个 Pydantic 请求/响应模型 |
+| `db.py` | 基础设施 | SQLite 9 表持久化（aiosqlite, WAL） |
+| `vector_search.py` | 基础设施 | sentence-transformers/FAISS 向量检索 |
+| `state_machine.py` | 基础设施 | 四象限排查状态机 |
+| `websocket_manager.py` | 基础设施 | 按 incident 分组 WebSocket 广播 |
+| `llm_client.py` | Person A | 多 provider 异步 LLM 客户端 |
+| `reasoner.py` | Person A | 四阶段链式根因推理 |
+| `log_analyzer.py` | Person A | 日志智能分析（LLM+规则双模） |
+| `copilot.py` | Person A | 有状态多轮对话智能体 |
+| `credibility.py` | Person A | 可信度评分+证据链+风险评估 |
+| `knowledge_distiller.py` | Person A | 复盘→知识资产蒸馏 |
+| `data_service.py` | Person B | Excel/Word ETL 数据管道 |
+| `knowledge_graph.py` | Person B | 邻接表+BFS 图查询 |
+| `alarm_analyze.py` | Person B | 告警文本解析与系统匹配 |
+| `fault_diagnosis.py` | Person B | 告警根因自动诊断 |
 
-## 预估工作量
+### 仅待完成
 
-| 功能 | 复杂度 | 依赖 |
-|------|--------|------|
-| Copilot诊断 + 多轮对话 | 🔴 高 | LLM服务 |
-| 脚本生成与验证 | 🔴 高 | Copilot诊断、LLM |
-| 自动复盘与知识积累 | 🟡 中 | 时间线、脚本管理 |
-| 讨论区多角色 | 🟡 中 | 无 |
-| 相似案例与知识资产 | 🟡 中 | 案例库查询 |
+| 任务 | 说明 |
+|------|------|
+| B7 前端增强 | React/Vue + ECharts/D3 图可视化 + 流式对话展示 |
 
----
+### 部署
 
-## 实施建议
-
-1. **阶段1**（当前）：前端框架优化 + 讨论区消息扩展
-2. **阶段2**：Copilot诊断基础（无LLM版本用mock）
-3. **阶段3**：脚本管理与LLM集成
-4. **阶段4**：自动复盘与知识循环
+```bash
+pip install -r requirements.txt
+uvicorn src.backend.app:app --reload --host 0.0.0.0 --port 8000
+# 或
+docker-compose up
+```

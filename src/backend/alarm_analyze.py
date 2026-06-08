@@ -27,7 +27,7 @@ class AlarmAnalyzer:
         for term in cls.KEY_TERMS:
             if term in text and term not in keywords:
                 keywords.append(term)
-        tokens = [token for token in re.split(r'[\s，。；；,;:\-\/\[\]()]+', text) if len(token) > 1]
+        tokens = [token for token in re.split(r'[\s，。；；,;:\-\/\[\]()【】\u00A0]+', text) if len(token) > 1]
         for token in tokens:
             if token not in keywords and len(keywords) < 15:
                 keywords.append(token)

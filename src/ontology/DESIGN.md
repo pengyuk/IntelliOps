@@ -1,34 +1,40 @@
 # 本体设计（Ontology）
 
-## 目标
+## 当前实现（2026-06-06）
 
-构建用于知识图谱的标准化语义层，明确实体、属性、关系与约束，便于跨模块共享。
+> **实际采用轻量 JSON Schema 校验**，定义实体/属性/关系规范。验证逻辑已独立为 `validator.py`。
 
-## 推荐实体集
+### 实现文件
 
-- `Incident`, `Alert`, `Service`, `Host`, `Change`, `WorkOrder`, `Action`, `Person`, `SOP`
+| 文件 | 位置 | 功能 |
+|------|------|------|
+| `validator.py` | `src/ontology/` | `ONTOLOGY_SCHEMA` 定义 + `validate_payload()` 校验函数 |
+| `sample_ontology.jsonld` | `src/ontology/` | 示例 JSON-LD 本体文件 |
+| `__init__.py` | `src/ontology/` | 模块入口 |
 
-## 属性与类型（示例）
+### API 端点
 
-- `Incident.status` (enum)
-- `Alert.severity` (int)
-- `Service.owner` (Person)
-- `Change.affected_entities` (list)
+| 端点 | 说明 |
+|------|------|
+| `GET /ontology` | 返回示例 JSON-LD 本体 |
+| `GET /ontology/version` | 返回版本号 `v0.1` |
+| `GET /ontology/schema` | 返回验证规则 |
+| `POST /ontology/validate` | 校验 JSON-LD 载荷 |
 
-## 关系模式
+## 实体与关系
 
-- `Incident` - `related_to` -> `Alert`
-- `Service` - `depends_on` -> `Service/Host`
-- `Change` - `affects` -> `Service/Host`
-- `Action` - `used_in` -> `SOP` / `Incident`
+### 实体集
+`Incident`, `Alert`, `Service`, `Host`, `Change`, `WorkOrder`, `Action`, `Person`, `SOP`
 
-## 格式化与版本管理
+### 关系模式
+- `Incident` — `related_to` → `Alert`
+- `Service` — `depends_on` → `Service` / `Host`
+- `Change` — `affects` → `Service` / `Host`
+- `Action` — `used_in` → `SOP` / `Incident`
 
-- 初期以 JSON-LD 或 TTL 表达，后期导出 OWL 供推理使用
-- 使用语义版本号（v0.1, v0.2）并记录变更日志
+## 未来演进
 
-## 校验与一致性
-
-- 提供本体验证工具（JSON Schema）确保入图数据符合本体约定
-- 定期跑一致性检查（例如循环依赖、孤立实体）
+- Ontology CRUD 端点（创建/更新/删除实体和关系定义）
+- 版本演进管理（v0.1 → v0.2 变更日志）
+- OWL 导出供外部推理引擎使用
 

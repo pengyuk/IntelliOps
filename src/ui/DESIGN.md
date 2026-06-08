@@ -1,24 +1,69 @@
 ﻿# 前端设计（UI）
 
-## 设计核心
+## 当前实现（2026-06-06，B7 已完成）
 
-**场景**：发生应急故障 → 维护人员登入 → 大模型 Copilot 自动诊断 → 人机协同分析 → 推荐执行/脚本生成 → 多角色沟通 → 故障解决 → 自动复盘 → 知识积累
+> **React + Vite + ECharts SPA**。14 个源文件，覆盖全部后端 API。保留 `index.html` 作为早期原型参考。
 
-**目标**：让大模型参与故障认知全过程，维护/开发通过"聊天+工具"协同完成诊断与处置。
+### 实现文件
 
----
+| 文件 | 说明 |
+|------|------|
+| `package.json` | React 18 + Vite 5 + ECharts 5 + Zustand 4 |
+| `vite.config.js` | 开发代理 `/api` → `localhost:8000` |
+| `index-react.html` | Vite 入口 HTML |
+| `src/main.jsx` | React 入口 |
+| `src/App.jsx` | 主布局（5 面板 Grid）+ IncidentSelector + TimelineList |
+| `src/store.js` | Zustand 全局状态（API 调用 + WebSocket） |
+| `src/hooks/useWebSocket.js` | WebSocket 自动重连 + 事件驱动刷新 |
+| `src/components/Header.jsx` | 事故状态、角色切换、操作按钮 |
+| `src/components/DiagnosisPanel.jsx` | 根因推理卡片（置信度+进度条+证据链+日志摘要） |
+| `src/components/KnowledgePanel.jsx` | 相似案例 + 知识资产 |
+| `src/components/ScriptPanel.jsx` | 脚本推荐、预执行、执行+审批 |
+| `src/components/DiscussionPanel.jsx` | 多角色讨论 + Copilot 流式回复 |
+| `src/components/LogPanel.jsx` | 执行审计日志 |
+| `src/components/GraphView.jsx` | ECharts 力导向图（KG 服务依赖可视化） |
+| `src/components/PostmortemDialog.jsx` | 复盘报告模态框 |
+| `src/index.css` | 全局样式（CSS 变量 + Grid 布局） |
+| `src/components/ContextPanel.jsx` | 占位（逻辑已并入 App.jsx） |
+| `index.html` | 早期原生 JS 原型（保留参考） |
 
-## 页面与组件架构
+### 启动方式
 
-### 核心页面：故障应急工作间（War Room）
+```bash
+cd src/ui
+npm install
+npm run dev        # 开发模式（http://localhost:5173，自动代理 :8000）
+npm run build      # 生产构建 → dist/
+```
 
-单一主工作间，包含 5 个核心区域，支持维护/开发/Copilot 三位一体协同分析：
+### 当前已实现的 5 区域
 
-- **头部**：事故状态、影响、SLA
-- **左侧**：事故上下文（服务、告警、变更、时间脉络、关联知识）
-- **中央**：Copilot 自动诊断与多轮对话（大模型核心）
-- **右侧**：多角色讨论区（维护/开发实时沟通）
-- **下方**：可执行工具与脚本建议 + 执行日志
+- **头部**：事故状态、角色切换、Copilot 诊断/复盘按钮
+- **左侧**：事故列表、KG 上下文、时间线
+- **中央上**：根因推理面板 + 相似案例/知识资产
+- **中央下**：脚本建议 + 执行按钮（含 dry-run/审批）
+- **右侧**：多角色讨论区（Copilot/运维/开发） + 执行审计日志
+
+### 技术栈
+
+| 维度 | 当前 | 目标（B7） |
+|------|------|-----------|
+| 框架 | 原生 JS + CSS | ✅ React 18 + Vite + Zustand |
+| 状态管理 | 全局 `state` 对象 | ✅ Zustand store（`src/store.js`） |
+| 实时更新 | 手动"刷新"按钮 | ✅ WebSocket 自动推送（`useWebSocket` hook） |
+| 图可视化 | 无 | ✅ ECharts 力导向图（`GraphView.jsx`） |
+| 流式对话 | 无 | ✅ Copilot 回复实时展示（`DiscussionPanel.jsx`） |
+| 移动端 | 媒体查询适配 | ✅ 响应式 CSS Grid 布局 |
+
+## 设计核心（保持）
+
+以下设计理念贯穿始终，不受实现方式影响：
+
+- **大模型前置**：自动诊断，而非被动等待
+- **人机协同**：Copilot 建议 + 运维决策 + 开发确认
+- **可执行优先**：诊断 → 工具/脚本 → 执行
+- **透明审计**：置信度、依据、历史全记录
+- **知识循环**：故障 → 脚本 → 复盘 → 资产
 
 ---
 

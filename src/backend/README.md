@@ -59,13 +59,27 @@ API 示例：
 - `GET /alarm/{alarm_id}/match` 告警系统与负责人匹配
 - `GET /alarm/{alarm_id}/impact` 计算告警影响范围
 - `GET /diagnosis/alarm/{alarm_id}` 执行告警自动诊断
+- `GET /incident/{id}/investigation-state` 查看排查状态（四象限）
+- `POST /incident/{id}/investigation-state` 更新排查状态
+- `POST /incident/{id}/investigation-state/item` 添加排查项
+- `POST /incident/{id}/investigation-state/move` 移动排查项
+- `WS /ws/incident/{id}` WebSocket 实时推送
+- `GET /ws/status` WebSocket 连接状态
+- `GET /postmortem/{id}/knowledge` 获取蒸馏知识资产
 - `GET /ui/` 访问前端原型页面
 
-缺失/待补充后端能力：
-- 实时推送/WebSocket 协同更新接口
-- 复杂 KG 搜索与图可视化数据接口
-- Ontology CRUD 与版本演进管理接口
-- 事件更新、备注与协同消息记录接口的持久化和审计增强
+新增能力（Person B 完成）：
+- ✅ WebSocket 实时推送：`WS /ws/incident/{id}` + 时间线自动广播
+- ✅ SQLite 持久化：`db.py` 9 表，重启不丢数据
+- ✅ 排查状态机：`GET/POST /incident/{id}/investigation-state`
+- ✅ 向量检索：`vector_search.py`（sentence-transformers + FAISS）
+- ✅ 告警诊断管线：`alarm_analyze.py` + `fault_diagnosis.py` + `knowledge_graph.py`
+- ✅ 知识蒸馏：`GET /postmortem/{id}/knowledge`
+- ✅ Docker 部署：`Dockerfile` + `docker-compose.yml`
+
+缺失/待补充：
+- Ontology CRUD 与版本演进管理
+- 前端 React 重构 + 图可视化（B7）
 
 LLM 配置：
 

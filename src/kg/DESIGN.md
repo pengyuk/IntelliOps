@@ -1,31 +1,38 @@
 # 知识图谱设计（KG）
 
-## 目标
+## 当前实现（2026-06-06）
 
-将多源数据按照本体清洗、抽取并入图，支持快速关联查询、历史检索与推荐。
+> **实际采用轻量级内存图**，快速验证关联查询和影响面分析场景。
 
-## 构建流水线
+| 维度 | 设计目标 | 实际实现 |
+|------|---------|---------|
+| 图 DB | Neo4j / JanusGraph | `knowledge_graph.py` 内存邻接表 |
+| ETL | Kafka + Airflow | `data_service.py` Excel/Word 直接加载 |
+| 数据源 | T-CMDB/T-OPM/优云 | 本地 Excel（系统访问关系 + 应用管理报表） |
+| 查询 | Cypher / Gremlin | BFS 子图遍历 + 关键词匹配 |
 
-1. 数据抽取（ETL）：从 T-CMDB/T-OPM/优云/变更/工单抽取原始记录
-2. 标准化：字段映射、时间规范化、实体标识统一
-3. 实体抽取与消歧：基于规则+模型（简单匹配+启发式）
-4. 关系构建：根据变更/依赖/时间窗口建立边
-5. 写入图数据库并触发索引/聚合任务
+### 实现文件
 
-## 技术建议
+| 文件 | 位置 | 功能 |
+|------|------|------|
+| `knowledge_graph.py` | `src/backend/` | 邻接表构建、BFS 子图、影响范围 `impact_scope()`、模糊匹配 `match_nodes()` |
+| `data_service.py` | `src/backend/` | 从 Excel 加载系统关系、从 Word 加载复盘报告 |
+| `sample_kg.json` | `src/kg/` | 示例静态图数据（原型早期使用，现已被真实数据替代） |
 
-- 图 DB：Neo4j（友好查询）或 JanusGraph（可扩展）
-- 使用 Kafka 做数据流入时的缓冲与解耦
-- 使用容器化作业（Airflow）编排 ETL
+### 已实现的查询场景
 
-## 查询场景
+- ✅ 根据 Incident 查找相关 Service / Change / Alert
+- ✅ BFS 子图探索（`GET /kg/subgraph?node_id=X&depth=N`）
+- ✅ 影响范围分析（`GET /alarm/{id}/impact`）
+- ✅ 服务历史关联事故（`GET /kg/history`）
+- ✅ 模糊匹配系统名（`match_nodes()` 用于告警→系统关联）
+- 🟡 向量检索相似案例 → `vector_search.py`（独立模块）
 
-- 根据 `Incident` 查找相关 `Change` 与 `Service` 依赖链
-- 检索历史相似 `Incident`（基于标签/特征向量）
-- 生成推荐排查路径（基于常见修复步骤频次）
+## 未来演进方向
 
-## 质量保障
+当数据量和查询复杂度增长时：
 
-- 定期运行覆盖率报告（实体覆盖率、关系稀疏度）
-- 提示缺失关键属性的实体并支持人工补齐
+1. **子图入图**：将关键服务及最近 3-6 个月变更/告警导入 Neo4j
+2. **多跳推理**：`Service → depends_on → Service → affected_by → Change` 路径查询
+3. **图可视化**：前端 D3/ECharts 渲染依赖拓扑（B7 待完成）
 

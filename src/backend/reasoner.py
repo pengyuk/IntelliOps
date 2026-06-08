@@ -1,132 +1,269 @@
+"""
+IncidentReasoner — multi-stage chain-of-thought root cause reasoning.
+
+Stage 1: Symptom classification (what kind of failure?)
+Stage 2: Dependency & blast-radius analysis (what's affected?)
+Stage 3: Change & alert correlation (what changed recently?)
+Stage 4: Root cause synthesis (ranked hypotheses + evidence chains)
+
+Falls back to rule-based reasoning when LLM is unavailable or parsing fails.
+"""
+
+from __future__ import annotations
+
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .llm_client import LLMClient
+from .llm_client import LLMClient, LLMResponse
+
+
+# ---------------------------------------------------------------------------
+# Prompt templates
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """\
+你是一个 SRE 故障根因推理专家。你需要按照结构化思维链分析故障，最终输出 JSON。
+
+分析框架（在思维中完成，不输出）：
+1. 故障现象分类：延迟？错误率？资源耗尽？依赖故障？
+2. 影响面分析：哪些服务/主机/依赖受影响？依赖链是什么？
+3. 变更关联：告警时间窗口内有哪些变更？谁最可疑？
+4. 根因排序：综合证据，对候选根因按置信度排序。
+
+输出要求：
+- 严格输出 JSON，不要包含任何额外文本、解释或 markdown 代码块标记。
+- 每个 candidate_root_cause 必须包含 cause、confidence(0-1)、detail、evidence_items(字符串数组)。
+- reasoning_chain 用简短文字描述从现象到根因的推导路径。
+- confidence_summary 取所有候选置信度的加权平均。
+"""
+
+USER_PROMPT_TEMPLATE = """\
+## 事件信息
+{incident_json}
+
+## 知识图谱上下文
+{kg_json}
+
+请按分析框架推理，输出 JSON。"""
+
+
+# ---------------------------------------------------------------------------
+# IncidentReasoner
+# ---------------------------------------------------------------------------
 
 class IncidentReasoner:
+    """Multi-stage root cause reasoner with LLM + rule-based fallback."""
+
     @staticmethod
-    def _build_prompt(incident: Dict[str, Any], kg_context: Dict[str, List[Dict[str, Any]]]) -> str:
-        prompt_lines = [
-            '你是一个故障根因推理助手。根据下面的事件和知识图谱上下文，输出仅包含一个 JSON 对象，字段如下：',
-            '- incident_id',
-            '- candidate_root_causes (数组，包含 cause、confidence、detail)',
-            '- reasoning_steps (数组)',
-            '- evidence (数组)',
-            '- confidence_summary (0-1 浮点数)',
-            '不要输出任何额外文本。',
-            '',
-            '事件：',
-            json.dumps(incident, ensure_ascii=False, indent=2),
-            '',
-            'KG 上下文：',
-            json.dumps(kg_context, ensure_ascii=False, indent=2),
-        ]
-        return '\n'.join(prompt_lines)
+    def _build_system_prompt() -> str:
+        return SYSTEM_PROMPT
+
+    @staticmethod
+    def _build_user_prompt(incident: Dict[str, Any], kg_context: Dict[str, List[Dict[str, Any]]]) -> str:
+        return USER_PROMPT_TEMPLATE.format(
+            incident_json=json.dumps(incident, ensure_ascii=False, indent=2),
+            kg_json=json.dumps(kg_context, ensure_ascii=False, indent=2),
+        )
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:
-        json_text = None
-        start = text.find('{')
+        """Robust JSON extraction — tries direct parse, then bracketed extraction."""
+        text = text.strip()
+
+        # Remove markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Drop first line (```json or ```) and last line (```)
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+            text = "\n".join(lines).strip()
+
+        # Direct parse attempt
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Bracket-matching extraction
+        start = text.find("{")
         if start >= 0:
             brace_level = 0
             for i, ch in enumerate(text[start:], start=start):
-                if ch == '{':
+                if ch == "{":
                     brace_level += 1
-                elif ch == '}':
+                elif ch == "}":
                     brace_level -= 1
                     if brace_level == 0:
-                        json_text = text[start:i + 1]
-                        break
-        if json_text is None:
-            raise ValueError('未能找到 JSON 对象')
-        try:
-            return json.loads(json_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f'JSON 解析失败: {exc}') from exc
+                        try:
+                            return json.loads(text[start : i + 1])
+                        except json.JSONDecodeError:
+                            break
+
+        raise ValueError("未能从 LLM 响应中找到有效 JSON 对象")
 
     @staticmethod
-    def _rule_based_fallback(incident: Dict[str, Any], kg_context: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-        summary = incident.get('summary', '')
-        related_alerts = incident.get('related_alerts', [])
-        related_changes = incident.get('related_changes', [])
-        affected_services = incident.get('affected_services', [])
-        alert_nodes = kg_context.get('alerts', [])
-        change_nodes = kg_context.get('changes', [])
-        service_nodes = kg_context.get('services', [])
+    def _validate_reasoning_output(parsed: Dict[str, Any], incident_id: str) -> Dict[str, Any]:
+        """Ensure the parsed output has all required fields."""
+        if not parsed.get("incident_id"):
+            parsed["incident_id"] = incident_id
+        if not isinstance(parsed.get("candidate_root_causes"), list):
+            parsed["candidate_root_causes"] = []
+        if not isinstance(parsed.get("evidence"), list):
+            parsed["evidence"] = []
+        if not isinstance(parsed.get("reasoning_steps"), list):
+            parsed["reasoning_steps"] = []
+        if not isinstance(parsed.get("reasoning_chain"), str):
+            parsed["reasoning_chain"] = ""
 
-        candidate_root_causes = []
-        evidence = []
-        reasoning_steps = []
+        # Normalize each candidate
+        for cause in parsed["candidate_root_causes"]:
+            if not isinstance(cause.get("evidence_items"), list):
+                cause["evidence_items"] = []
+            if not isinstance(cause.get("confidence"), (int, float)):
+                cause["confidence"] = 0.5
+            cause["confidence"] = max(0.0, min(1.0, float(cause["confidence"])))
 
-        if '延迟' in summary or '慢' in summary:
-            candidate_root_causes.append({
-                'cause': '服务响应延迟',
-                'confidence': 0.78,
-                'detail': '摘要包含延迟类描述，说明可能为服务性能或网络资源问题。'
+        # Recalculate confidence_summary
+        confidences = [c.get("confidence", 0) for c in parsed["candidate_root_causes"]]
+        parsed["confidence_summary"] = round(sum(confidences) / max(len(confidences), 1), 2)
+
+        return parsed
+
+    # ------------------------------------------------------------------
+    # Rule-based fallback (local, no LLM)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rule_based_fallback(
+        incident: Dict[str, Any], kg_context: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, Any]:
+        summary = incident.get("summary", "")
+        related_alerts = incident.get("related_alerts", [])
+        related_changes = incident.get("related_changes", [])
+        affected_services = incident.get("affected_services", [])
+        alert_nodes = kg_context.get("alerts", [])
+        change_nodes = kg_context.get("changes", [])
+        service_nodes = kg_context.get("services", [])
+
+        candidates: List[Dict[str, Any]] = []
+        evidence: List[str] = []
+        steps: List[str] = []
+
+        if "延迟" in summary or "慢" in summary or "latency" in summary.lower():
+            candidates.append({
+                "cause": "服务响应延迟 — 可能由下游资源瓶颈、连接池耗尽或网络抖动导致",
+                "confidence": 0.78,
+                "detail": "事件摘要包含延迟类描述，优先排查数据库连接池、慢查询和网络链路。",
+                "evidence_items": ["摘要含延迟关键词", "需补充 P99 延迟趋势和连接池指标"],
             })
-            reasoning_steps.append('识别故障现象为延迟/慢响应。')
-            evidence.append('事件摘要包含延迟相关词语。')
+            steps.append("【现象分类】故障表现为延迟升高，归类为性能退化型故障。")
+            evidence.append("事件摘要包含延迟相关描述。")
 
         if related_alerts:
-            alert_names = [node.get('name') for node in alert_nodes]
-            candidate_root_causes.append({
-                'cause': '监控告警触发的系统异常',
-                'confidence': 0.65,
-                'detail': f'检测到相关告警 {alert_names}，需要关联告警详情进行确认。'
+            alert_names = [node.get("name", aid) for node in alert_nodes for aid in related_alerts if node.get("id") == aid] or related_alerts
+            candidates.append({
+                "cause": "监控告警触发的系统异常 — 需关联告警详情确定触发源",
+                "confidence": 0.65,
+                "detail": f"关联告警：{alert_names}，建议核对告警时间线与故障窗口的重叠度。",
+                "evidence_items": [f"相关告警: {alert_names}"],
             })
-            reasoning_steps.append('关联告警记录，准备提取告警上下文。')
-            evidence.append(f'相关告警：{alert_names}。')
+            steps.append("【告警关联】发现相关告警记录，正在匹配时间窗口。")
+            evidence.append(f"相关告警：{alert_names}")
 
         if related_changes:
-            change_names = [node.get('name') for node in change_nodes]
-            candidate_root_causes.append({
-                'cause': '近期变更引发的配置或部署异常',
-                'confidence': 0.72,
-                'detail': f'发现相关变更 {change_names}，可能引起故障。'
+            change_names = [node.get("name", cid) for node in change_nodes for cid in related_changes if node.get("id") == cid] or related_changes
+            candidates.append({
+                "cause": "近期变更引入的配置或部署异常 — 变更窗口与故障时间高度重叠",
+                "confidence": 0.72,
+                "detail": f"可疑变更：{change_names}，建议审查变更内容并评估回滚可行性。",
+                "evidence_items": [f"关联变更: {change_names}"],
             })
-            reasoning_steps.append('检查相关变更记录，判断变更是否与当前故障相关。')
-            evidence.append(f'关联变更：{change_names}。')
+            steps.append("【变更关联】发现窗口内变更，将其列为高优先级排查对象。")
+            evidence.append(f"关联变更：{change_names}")
 
         if affected_services:
-            service_names = [node.get('name') for node in service_nodes]
-            candidate_root_causes.append({
-                'cause': '核心服务相关依赖异常',
-                'confidence': 0.7,
-                'detail': f'受影响服务：{service_names}，可能涉及依赖链问题。'
+            service_names = [node.get("name", sid) for node in service_nodes for sid in affected_services if node.get("id") == sid] or affected_services
+            candidates.append({
+                "cause": "核心服务依赖链异常 — 上游或下游依赖可能导致级联故障",
+                "confidence": 0.70,
+                "detail": f"受影响服务：{service_names}，建议绘制依赖拓扑，定位级联起点。",
+                "evidence_items": [f"影响服务: {service_names}"],
             })
-            reasoning_steps.append('分析受影响服务及其依赖链。')
-            evidence.append(f'影响服务：{service_names}。')
+            steps.append("【依赖分析】受影响服务已识别，正在分析依赖链路。")
+            evidence.append(f"影响服务：{service_names}")
 
-        if not candidate_root_causes:
-            candidate_root_causes.append({
-                'cause': '未知根因，需要更多数据',
-                'confidence': 0.45,
-                'detail': '当前事件信息不足，需补充日志、性能指标和告警详情。'
+        if not candidates:
+            candidates.append({
+                "cause": "信息不足，无法确定高置信度根因 — 建议补充日志、指标和变更记录",
+                "confidence": 0.35,
+                "detail": "当前仅有事件摘要，缺少日志片段、性能指标、变更详情等关键上下文。",
+                "evidence_items": ["事件信息有限"],
             })
-            reasoning_steps.append('根据现有事件信息，暂无法确定高置信度根因。')
-            evidence.append('事件摘要、关联变更或告警信息不足。')
+            steps.append("【信息不足】当前证据不足以支持高置信度推理。")
+            evidence.append("事件摘要、关联变更或告警信息不足。")
 
         return {
-            'incident_id': incident.get('incident_id'),
-            'candidate_root_causes': candidate_root_causes,
-            'reasoning_steps': reasoning_steps,
-            'evidence': evidence,
-            'confidence_summary': round(sum([c['confidence'] for c in candidate_root_causes]) / len(candidate_root_causes), 2),
+            "incident_id": incident.get("incident_id"),
+            "candidate_root_causes": candidates,
+            "reasoning_steps": steps,
+            "reasoning_chain": " → ".join(s.replace("【", "").replace("】", ": ").rstrip("。") for s in steps),
+            "evidence": evidence,
+            "confidence_summary": round(sum(c["confidence"] for c in candidates) / len(candidates), 2),
+            "method": "rule_based",
         }
 
-    @staticmethod
-    def infer_root_causes(incident: Dict[str, Any], kg_context: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
-        client = LLMClient()
-        if client.provider in ('openai', 'anthropic'):
-            prompt = IncidentReasoner._build_prompt(incident, kg_context)
-            response = client.infer(prompt, metadata={'incident': incident, 'kg_context': kg_context})
-            try:
-                parsed = IncidentReasoner._extract_json(response.get('text', ''))
-                if parsed.get('incident_id') is None:
-                    parsed['incident_id'] = incident.get('incident_id')
-                return parsed
-            except ValueError:
-                pass
+    # ------------------------------------------------------------------
+    # Main entry point (async)
+    # ------------------------------------------------------------------
 
+    @staticmethod
+    async def infer_root_causes(
+        incident: Dict[str, Any],
+        kg_context: Dict[str, List[Dict[str, Any]]],
+    ) -> Dict[str, Any]:
+        """Run multi-stage root cause reasoning.
+
+        Returns dict with keys:
+        - incident_id
+        - candidate_root_causes: [{cause, confidence, detail, evidence_items}]
+        - reasoning_steps: [str]
+        - reasoning_chain: str
+        - evidence: [str]
+        - confidence_summary: float
+        - method: 'llm' | 'rule_based'
+        """
+        client = LLMClient()
+
+        if client.provider in ("openai", "anthropic", "ollama"):
+            print(f"[Reasoner] Using LLM provider: {client.provider}")
+            system = IncidentReasoner._build_system_prompt()
+            user = IncidentReasoner._build_user_prompt(incident, kg_context)
+
+            try:
+                response: LLMResponse = await client.infer(
+                    prompt=user,
+                    system=system,
+                    json_mode=(client.provider == "openai"),  # native JSON mode for OpenAI
+                    temperature=0.0,
+                    max_tokens=2048,
+                )
+                parsed = IncidentReasoner._extract_json(response.text)
+                result = IncidentReasoner._validate_reasoning_output(parsed, incident.get("incident_id", ""))
+                result["method"] = "llm"
+                result["model"] = response.model
+                result["latency_ms"] = response.latency_ms
+                print(f"[Reasoner] LLM reasoning complete ({response.latency_ms:.0f}ms, {response.usage.total_tokens} tokens)")
+                return result
+            except (ValueError, RuntimeError) as exc:
+                # LLM failed or parsing failed — fall back to rules
+                print(f"[Reasoner] LLM failed, falling back to rule-based: {exc}")
+                result = IncidentReasoner._rule_based_fallback(incident, kg_context)
+                result["llm_error"] = str(exc)[:200]
+                return result
+
+        # No LLM configured — use rules
+        print("[Reasoner] No LLM provider configured, using rule-based reasoning")
         return IncidentReasoner._rule_based_fallback(incident, kg_context)

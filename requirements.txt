@@ -1,8 +1,13 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
-openai
+openai>=1.0.0
+httpx
+aiosqlite
+numpy
 pandas
 openpyxl
 xlrd>=2.0.1
 python-docx
+pyyaml>=6.0
+# optional: pip install sentence-transformers faiss-cpu for vector search
