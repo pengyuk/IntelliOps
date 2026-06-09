@@ -1,4 +1,4 @@
-"""
+﻿"""
 SQLite database layer — replaces in-memory Dict/List stores.
 
 Tables: incidents, timeline_events, discussion_messages, scripts,

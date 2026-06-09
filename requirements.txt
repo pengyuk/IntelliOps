@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 pydantic
+python-dotenv
 openai>=1.0.0
 httpx
 aiosqlite

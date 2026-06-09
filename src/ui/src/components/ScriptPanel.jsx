@@ -42,6 +42,7 @@ export default function ScriptPanel() {
           scripts.map(script => {
             const risk = RISK_CONFIG[script.risk_level] || RISK_CONFIG.low
             const isExecuting = executing[script.script_id]
+            const isKgAware = script.category === 'kg_aware'
             return (
               <div key={script.script_id} className={`card script-card ${script.risk_level}`}>
                 <div className="row">
@@ -50,7 +51,17 @@ export default function ScriptPanel() {
                     <span className={`status-dot ${risk.cls}`} />
                     {risk.sig}
                   </span>
+                  {isKgAware && (
+                    <span className="badge" style={{ fontSize: 7, background: 'var(--sig-violet)', color: '#fff', marginLeft: 2 }}>
+                      TOPO
+                    </span>
+                  )}
                 </div>
+                {script.topology_hint && (
+                  <p className="muted" style={{ marginTop: 2, fontSize: 9, color: 'var(--sig-violet)', fontStyle: 'italic' }}>
+                    🔗 {script.topology_hint}
+                  </p>
+                )}
                 {script.explanation && (
                   <p className="muted" style={{ marginTop: 3, lineHeight: 1.4, fontSize: 10 }}>{script.explanation}</p>
                 )}

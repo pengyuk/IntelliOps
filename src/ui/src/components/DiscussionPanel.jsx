@@ -10,7 +10,7 @@ const ROLE_CONFIG = {
 }
 
 export default function DiscussionPanel() {
-  const { messages, sendDiscussion, askCopilot, selectedId } = useStore()
+  const { messages, sendDiscussion, askCopilot, selectedId, discussionEvidence } = useStore()
   const [text, setText] = useState('')
   const [streaming, setStreaming] = useState('')
   const [isAsking, setIsAsking] = useState(false)
@@ -85,6 +85,22 @@ export default function DiscussionPanel() {
             </div>
           </div>
         )}
+
+        {/* P0-2: Discussion evidence extracted by sync agent */}
+        {discussionEvidence.length > 0 && (
+          <div className="section-title" style={{ fontSize: 9, marginTop: 8, marginBottom: 4, color: 'var(--sig-violet)' }}>
+            🧠 AI从讨论中提取的证据
+          </div>
+        )}
+        {discussionEvidence.map((ev, i) => {
+          const evIcons = { change: '🔧', confirmation: '✅', action_taken: '⚡', recovery: '🟢', ongoing: '🔴', discovery: '🔍', handoff: '🔄' }
+          return (
+            <div key={i} className="card" style={{ fontSize: 10, padding: '4px 8px', marginBottom: 4, borderLeftColor: 'var(--sig-violet)', borderLeftWidth: 2 }}>
+              {evIcons[ev.type] || '📌'} [{ev.author_role}] {ev.summary}
+              <span className="muted" style={{ marginLeft: 6 }}>{(ev.confidence * 100).toFixed(0)}% 可信</span>
+            </div>
+          )
+        })}
       </div>
       <div className="composer">
         <textarea

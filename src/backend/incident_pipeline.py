@@ -104,6 +104,10 @@ async def run_incident_pipeline(
     incident['related_cases'] = related_cases
     incident['auto_diagnosis'] = diagnosis
     incident['active_skills'] = diagnosis.get('active_skills', [])
+    # P0-1: 扩展上下游ID到incident，供检索和相似案例匹配使用
+    incident['_upstream_ids'] = kg_context.get('upstream_ids', [])
+    incident['_downstream_ids'] = kg_context.get('downstream_ids', [])
+    incident['_all_change_ids'] = kg_context.get('all_change_ids', [])
     
     print(f"[Pipeline] ========== Complete: {incident_id} ==========")
     return results
@@ -149,6 +153,18 @@ async def _build_enriched_kg_context(
     all_node_ids |= upstream_ids | downstream_ids
     all_edges = _fetch_kg_edges(list(all_node_ids))
     
+    # ── P0-1: 检索上下游系统的变更记录 ──
+    # 上游系统的变更可能直接影响本服务
+    upstream_change_ids = list(upstream_ids - set(related_changes))
+    upstream_changes = _fetch_kg_nodes(upstream_change_ids) if upstream_change_ids else []
+    # 下游系统的变更也可能揭示问题（如回滚操作）
+    downstream_change_ids = list(downstream_ids - set(related_changes))
+    downstream_changes = _fetch_kg_nodes(downstream_change_ids) if downstream_change_ids else []
+    # 合并所有变更
+    all_changes = list(changes) + upstream_changes + downstream_changes
+    all_change_ids = set(related_changes) | upstream_ids | downstream_ids
+    all_node_ids |= all_change_ids
+    
     # Impact scope via KG service
     impact_scope = {}
     if _get_kg_service and affected:
@@ -169,11 +185,17 @@ async def _build_enriched_kg_context(
         'downstream': downstream_nodes,
         'upstream_ids': list(upstream_ids),
         'downstream_ids': list(downstream_ids),
+        # ── P0-1: 扩展变更上下文 ──
+        'upstream_changes': upstream_changes,
+        'downstream_changes': downstream_changes,
+        'all_changes': all_changes,
+        'all_change_ids': list(all_change_ids),
         'all_nodes': _fetch_kg_nodes(list(all_node_ids)),
         'edges': all_edges,
         'impact_scope': impact_scope,
         'dependency_chain': dependency_chain,
-        'summary': _build_kg_summary(services, upstream_nodes, downstream_nodes, changes, alerts),
+        'summary': _build_kg_summary(services, upstream_nodes, downstream_nodes, changes, alerts,
+                                       upstream_changes, downstream_changes),
     }
 
 
@@ -216,7 +238,8 @@ def _analyze_dependency_chain(
     return chain
 
 
-def _build_kg_summary(services, upstream, downstream, changes, alerts) -> str:
+def _build_kg_summary(services, upstream, downstream, changes, alerts,
+                       upstream_changes=None, downstream_changes=None) -> str:
     """Build a human-readable KG summary for timeline."""
     parts = []
     if services:
@@ -231,6 +254,13 @@ def _build_kg_summary(services, upstream, downstream, changes, alerts) -> str:
     if changes:
         names = [s.get('name', '?') for s in changes]
         parts.append(f"关联变更: {', '.join(names)}")
+    # P0-1: 上下游变更提示
+    if upstream_changes:
+        names = [s.get('name', '?') for s in upstream_changes]
+        parts.append(f"⚠️ 上游系统变更: {', '.join(names)}（上游变更可能传导至本服务）")
+    if downstream_changes:
+        names = [s.get('name', '?') for s in downstream_changes]
+        parts.append(f"下游系统变更: {', '.join(names)}")
     return '; '.join(parts) if parts else '知识图谱上下文已构建'
 
 
@@ -309,10 +339,12 @@ async def _run_skill_diagnosis(
     
     # Build candidates
     candidates = []
-    for cause in reasoning.get('candidate_root_causes', []):
+    for i, cause in enumerate(reasoning.get('candidate_root_causes', [])):
         conf = cause.get('confidence', 0)
+        rc_id = f"rc-{incident.get('incident_id', '')}-{i+1}"
         candidates.append({
             **cause,
+            'root_cause_id': rc_id,
             'confidence_level': 'high' if conf >= 0.75 else 'medium' if conf >= 0.55 else 'low',
             'evidence_chain': reasoning.get('evidence', []),
             'similar_incidents': related_cases[:3],
@@ -481,6 +513,7 @@ async def _create_pipeline_timeline(
     causes = diagnosis.get('candidate_root_causes', [])
     top_cause = causes[0].get('cause', '待确认') if causes else '待确认'
     top_conf = causes[0].get('confidence', 0) if causes else 0
+    top_rc_id = causes[0].get('root_cause_id', '') if causes else ''
     
     diag_detail = f'根因推理置信度: {confidence:.0%}。主要假设: {top_cause}（{top_conf:.0%}）'
     if len(causes) > 1:
@@ -494,6 +527,7 @@ async def _create_pipeline_timeline(
         f'智能诊断完成: {top_cause}（置信度 {top_conf:.0%}）',
         'system', 'system',
         f'{diag_detail}\n激活技能: {skill_str}',
+        related_root_cause_id=top_rc_id,
     )
     events.append(e4)
     
@@ -529,6 +563,8 @@ async def on_script_executed(
     conclusion = execution_result.get('conclusion', '')
     next_suggestion = execution_result.get('next_suggestion', '')
     script_name = execution_result.get('script_name', '未知脚本')
+    # P0-3: 获取关联的根因假设ID
+    related_rc_id = execution_result.get('related_root_cause_id', '')
     
     # Create meaningful timeline event
     if _add_timeline_fn and conclusion:
@@ -537,6 +573,7 @@ async def on_script_executed(
             f'脚本执行完成: {script_name} — {conclusion[:100]}',
             'copilot', 'copilot',
             f'执行输出: {output[:200]}\n结论: {conclusion}\n下一步建议: {next_suggestion}',
+            related_root_cause_id=related_rc_id,
         )
     
     # Update diagnosis if available
@@ -559,11 +596,13 @@ async def on_script_executed(
             if copilot_result.get('confidence_trend') != 'stable':
                 causes = diagnosis.get('candidate_root_causes', [])
                 top = causes[0] if causes else {}
+                top_rc_id = top.get('root_cause_id', related_rc_id) if top else related_rc_id
                 await _add_timeline_fn(
                     incident_id, 'diagnosis_update',
                     f'根因假设已更新: {top.get("cause", "")} 置信度 {top.get("confidence", 0):.0%}',
                     'copilot', 'copilot',
                     f'脚本执行结果已纳入分析，置信度趋势: {copilot_result.get("confidence_trend")}',
+                    related_root_cause_id=top_rc_id,
                 )
             
             return copilot_result
@@ -658,5 +697,41 @@ async def run_postmortem_agent(
             requested_by, _get_user_fn(requested_by).get('role', 'operator'),
             f'复盘报告ID: {postmortem_id}',
         )
+    
+    # ── P1-2: Knowledge Feedback Loop ──
+    # When postmortem is generated, apply feedback to referenced knowledge rules
+    try:
+        from .knowledge_distiller import apply_knowledge_feedback, KnowledgeFeedbackManager
+        
+        # Check if any historical knowledge rules were referenced in this incident
+        similar_cases = incident.get('related_cases', [])
+        for case in similar_cases:
+            # Find knowledge assets from the case's root cause
+            knowledge_id = case.get('knowledge_id', '')
+            if knowledge_id:
+                # The root cause matched → verified
+                knowledge_asset = case.get('knowledge_asset', {})
+                if knowledge_asset:
+                    updated = apply_knowledge_feedback(
+                        knowledge_asset, was_correct=True,
+                        incident_id=incident_id,
+                    )
+                    new_weight = updated.get('dynamic_weight', 0)
+                    new_level = KnowledgeFeedbackManager.get_reliability_level(updated)
+                    print(f"[Postmortem] Knowledge feedback: {knowledge_id} "
+                          f"verified → weight={new_weight:.0%}, level={new_level}")
+        
+        # Also record the current root cause conclusion for future feedback
+        diagnosis_causes = diagnosis.get('candidate_root_causes', [])
+        for cause in diagnosis_causes:
+            rc_id = cause.get('root_cause_id', '')
+            if rc_id:
+                # Initialize feedback fields for this root cause rule
+                cause.setdefault('verified_count', 0)
+                cause.setdefault('false_positive_count', 0)
+                cause.setdefault('dynamic_weight', cause.get('confidence', 0.5))
+                cause.setdefault('last_feedback_at', '')
+    except Exception as e:
+        print(f"[Postmortem] Knowledge feedback skipped: {e}")
     
     return report

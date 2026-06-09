@@ -8,12 +8,13 @@ const STATUS_MAP = {
   Postmortem: { label: 'POSTMORTEM', cls: 'info' },
 }
 
-export default function Header({ onRefresh, onDiagnose, onPostmortem }) {
+export default function Header({ onRefresh, onDiagnose, onPostmortem, isDiagnosing, diagnoseError }) {
   const { incident, users, userId, setUserId, canExecute, diagnosis, activeSkills } = useStore()
   const exec = canExecute()
   const statusInfo = STATUS_MAP[incident?.status] || { label: incident?.status || '--', cls: 'neutral' }
   const hasAutoDiagnosis = !!diagnosis
   const pipelineReady = hasAutoDiagnosis && activeSkills?.length > 0
+  const canDiagnose = !!incident && !isDiagnosing
 
   return (
     <header>
@@ -53,12 +54,17 @@ export default function Header({ onRefresh, onDiagnose, onPostmortem }) {
           {users.map(u => <option key={u.user_id} value={u.user_id}>{u.name} : {u.role}</option>)}
         </select>
         <button className="ghost" onClick={onRefresh} title="REFRESH">REFRESH</button>
-        <button className="primary" onClick={onDiagnose} disabled={!incident}>
-          {pipelineReady ? 'RE-DIAGNOSE' : 'DIAGNOSE'}
+        <button className="primary" onClick={onDiagnose} disabled={!canDiagnose}>
+          {isDiagnosing ? '⏳ DIAGNOSING...' : pipelineReady ? 'RE-DIAGNOSE' : 'DIAGNOSE'}
         </button>
         <button onClick={onPostmortem} disabled={!incident || incident?.status !== 'Resolved'}>
           POSTMORTEM
         </button>
+        {diagnoseError && (
+          <span className="badge bad" style={{ fontSize: 9, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            ❌ {diagnoseError}
+          </span>
+        )}
       </div>
     </header>
   )

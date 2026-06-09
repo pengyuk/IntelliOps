@@ -159,8 +159,18 @@ class SkillRouter:
                 if skill.name not in {s.name for s in active_skills}:
                     active_skills.append(skill)
         
+        # ── P2: Topology-aware skill augmentation ──
+        topology_skills, topology_hints = _get_topology_aware_skills(incident, loader)
+        for skill in topology_skills:
+            if skill and skill.name not in {s.name for s in active_skills}:
+                active_skills.append(skill)
+        
         # Step 3: Build skill context prompt for LLM
         skill_context_prompt = _build_skill_context_prompt(active_skills, intent)
+        
+        # Append topology hints to the context prompt
+        if topology_hints:
+            skill_context_prompt += "\n\n## 🔗 拓扑感知建议\n" + topology_hints
         
         # Step 4: Collect suggested APIs and next steps
         suggested_apis: List[str] = []
@@ -246,3 +256,137 @@ def _build_skill_context_prompt(skills: List[Skill], intent: IntentResult) -> st
     lines.append("")
     
     return "\n".join(lines)
+
+
+def _get_topology_aware_skills(
+    incident: Optional[Dict[str, Any]],
+    loader: Any,
+) -> Tuple[List[Any], str]:
+    """P2: Analyze KG topology to recommend context-aware skills.
+    
+    Returns:
+        (additional_skills, topology_hints_text)
+    """
+    if not incident:
+        return [], ""
+    
+    kg_context = incident.get('kg_context', {})
+    upstream_nodes = kg_context.get('upstream', [])
+    downstream_nodes = kg_context.get('downstream', [])
+    upstream_ids = kg_context.get('upstream_ids', [])
+    downstream_ids = kg_context.get('downstream_ids', [])
+    upstream_changes = kg_context.get('upstream_changes', [])
+    
+    if not upstream_nodes and not downstream_nodes:
+        return [], ""
+    
+    additional_skills = []
+    hints = []
+    
+    # Classify upstream types (reuse the classification logic)
+    upstream_types = _classify_node_types(upstream_nodes, upstream_ids)
+    downstream_types = _classify_node_types(downstream_nodes, downstream_ids)
+    
+    all_types = {**upstream_types, **downstream_types}
+    
+    # Database found in topology → recommend knowledge-retrieval with DB focus
+    if all_types.get('database'):
+        kr_skill = loader.get('knowledge-retrieval')
+        if kr_skill:
+            additional_skills.append(kr_skill)
+        db_names = ', '.join(all_types['database'][:3])
+        hints.append(
+            f"🔍 当前服务的上下游包含**数据库** ({db_names})。"
+            f"建议通过 `knowledge-retrieval` 技能查询这些数据库的历史故障和已知问题。"
+            f"优先检查：连接池配置、慢查询日志、锁等待、复制延迟。"
+        )
+    
+    # Message queue → check MQ status
+    if all_types.get('message_queue'):
+        la_skill = loader.get('log-analysis')
+        if la_skill and la_skill.name not in {s.name for s in additional_skills}:
+            additional_skills.append(la_skill)
+        mq_names = ', '.join(all_types['message_queue'][:3])
+        hints.append(
+            f"📨 当前服务的上下游包含**消息队列** ({mq_names})。"
+            f"建议通过 `log-analysis` 检查MQ的队列积压深度、消费延迟和死信情况。"
+        )
+    
+    # Third-party API → check external dependencies
+    if all_types.get('third_party'):
+        kr_skill = loader.get('knowledge-retrieval')
+        if kr_skill and kr_skill.name not in {s.name for s in additional_skills}:
+            additional_skills.append(kr_skill)
+        tp_names = ', '.join(all_types['third_party'][:3])
+        hints.append(
+            f"🌐 当前服务的上下游包含**第三方接口** ({tp_names})。"
+            f"建议查询这些第三方接口的SLA状态、历史故障模式和降级方案。"
+        )
+    
+    # Cache → check cache health
+    if all_types.get('cache'):
+        hints.append(
+            f"💾 当前服务的上下游包含**缓存** ({', '.join(all_types['cache'][:3])})。"
+            f"建议检查缓存命中率、过期策略和内存使用情况。"
+        )
+    
+    # Upstream has changes → high priority alert
+    if upstream_changes:
+        change_names = [c.get('name', '?') for c in upstream_changes[:3]]
+        hints.insert(0,
+            f"⚠️ **上游系统有变更记录**: {', '.join(change_names)}。"
+            f"上游变更是根因的高概率来源，请优先排查这些变更与当前故障的时间关联性。"
+        )
+    
+    # Downstream impact → consider war-room coordination
+    if downstream_nodes and len(downstream_nodes) >= 2:
+        wr_skill = loader.get('war-room-coordination')
+        if wr_skill and wr_skill.name not in {s.name for s in additional_skills}:
+            additional_skills.append(wr_skill)
+        hints.append(
+            f"📢 当前故障影响了 {len(downstream_nodes)} 个下游系统，"
+            f"可能造成级联影响。建议通过 `war-room-coordination` 同步通知下游负责人。"
+        )
+    
+    hints_text = '\n\n'.join(hints) if hints else ""
+    return additional_skills, hints_text
+
+
+# Simple topology type classification (mirrors app.py _classify_dependency_types)
+def _classify_node_types(
+    nodes: List[Dict[str, Any]],
+    node_ids: List[str],
+) -> Dict[str, List[str]]:
+    """Classify nodes by type using name heuristics."""
+    types: Dict[str, List[str]] = {
+        'database': [], 'message_queue': [], 'cache': [],
+        'third_party': [], 'gateway': [], 'storage': [], 'other': [],
+    }
+    
+    db_kw = ['db', 'database', 'postgres', 'mysql', 'oracle', 'mongo', 'sql', 'db2', 'tidb']
+    mq_kw = ['mq', 'kafka', 'rabbitmq', 'rocketmq', 'pulsar', 'qrep', 'queue']
+    cache_kw = ['cache', 'redis', 'memcached', 'caffeine']
+    tp_kw = ['third', 'external', 'api', 'gateway', 'payment', 'sms', 'push']
+    gw_kw = ['gateway', 'nginx', 'apigw', 'kong', 'zuul', 'ingress']
+    storage_kw = ['oss', 's3', 'minio', 'ceph', 'nas', 'nfs', 'hdfs']
+    
+    for i, node in enumerate(nodes):
+        name = str(node.get('name', node_ids[i] if i < len(node_ids) else '')).lower()
+        node_type = str(node.get('type', '')).lower()
+        
+        if any(k in name or k in node_type for k in db_kw):
+            types['database'].append(node.get('name', node_ids[i]))
+        elif any(k in name or k in node_type for k in mq_kw):
+            types['message_queue'].append(node.get('name', node_ids[i]))
+        elif any(k in name or k in node_type for k in cache_kw):
+            types['cache'].append(node.get('name', node_ids[i]))
+        elif any(k in name or k in node_type for k in tp_kw):
+            types['third_party'].append(node.get('name', node_ids[i]))
+        elif any(k in name or k in node_type for k in gw_kw):
+            types['gateway'].append(node.get('name', node_ids[i]))
+        elif any(k in name or k in node_type for k in storage_kw):
+            types['storage'].append(node.get('name', node_ids[i]))
+        else:
+            types['other'].append(node.get('name', node_ids[i]))
+    
+    return {k: v for k, v in types.items() if v}

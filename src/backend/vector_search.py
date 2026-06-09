@@ -19,6 +19,34 @@ import numpy as np
 class VectorSearch:
     """Lightweight vector search with optional FAISS acceleration."""
 
+    # Class-level shared model (warmed once at startup)
+    _shared_model = None
+    _model_name = None
+
+    @classmethod
+    async def prewarm(cls):
+        """Pre-load the embedding model at startup to avoid cold-start latency."""
+        if cls._shared_model is not None:
+            return True
+        model_name = os.environ.get("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
+        print(f"[VectorSearch] Pre-warming embedding model: {model_name} ...")
+        try:
+            from sentence_transformers import SentenceTransformer
+            cls._shared_model = SentenceTransformer(model_name)
+            cls._model_name = model_name
+            # Quick warm-up encode
+            _ = cls._shared_model.encode(["warmup test"], convert_to_numpy=True, show_progress_bar=False)
+            print(f"[VectorSearch] ✓ Embedding model ready: {model_name}")
+            return True
+        except ImportError:
+            print("[VectorSearch] ⚠ sentence-transformers not installed, using TF-IDF fallback")
+            cls._shared_model = False
+            return False
+        except Exception as e:
+            print(f"[VectorSearch] ⚠ Model pre-warm failed: {e}")
+            cls._shared_model = False
+            return False
+
     def __init__(self):
         self._model = None
         self._index = None
@@ -28,13 +56,17 @@ class VectorSearch:
     @property
     def model(self):
         if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer(
-                    os.environ.get("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
-                )
-            except ImportError:
-                self._model = False  # mark as unavailable
+            # Use shared pre-warmed model if available
+            if VectorSearch._shared_model is not None:
+                self._model = VectorSearch._shared_model if VectorSearch._shared_model is not False else None
+            else:
+                try:
+                    from sentence_transformers import SentenceTransformer
+                    self._model = SentenceTransformer(
+                        os.environ.get("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
+                    )
+                except ImportError:
+                    self._model = False  # mark as unavailable
         return self._model if self._model is not False else None
 
     def _encode(self, texts: List[str]) -> np.ndarray:

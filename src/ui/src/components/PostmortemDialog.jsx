@@ -77,7 +77,74 @@ export default function PostmortemDialog({ onClose }) {
                   <span>{(postmortem.knowledge.key_learnings || []).join(' | ')}</span>
                 </div>
               )}
+              {postmortem.knowledge.method && (
+                <div className="info-row">
+                  <span className="info-label">METHOD</span>
+                  <span className="badge neutral" style={{fontSize:8}}>{postmortem.knowledge.method.toUpperCase()}</span>
+                </div>
+              )}
             </div>
+          </>
+        )}
+
+        {postmortem._pipeline_extras && (
+          <>
+            <div className="section-title" style={{ marginTop: 14 }}>📊 PIPELINE_ANALYTICS</div>
+            {postmortem._pipeline_extras.dedup_summary && (() => {
+              const ds = postmortem._pipeline_extras.dedup_summary
+              return (
+                <div className="card" style={{ borderColor: 'var(--sig-cyan)', borderLeftWidth: 3 }}>
+                  <div style={{fontSize:11, fontFamily:'var(--font-display)', marginBottom:6}}>🔍 知识去重结果</div>
+                  <div className="info-row">
+                    <span className="info-label">已合并</span>
+                    <span className="badge ok">{ds.merged || 0}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">新增</span>
+                    <span className="badge info">{ds.new_entries || 0}</span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">变体</span>
+                    <span className="badge warn">{ds.variants || 0}</span>
+                  </div>
+                  {(ds.high_frequency_patterns || []).length > 0 && (
+                    <div style={{marginTop:6}}>
+                      <span className="badge" style={{background:'var(--sig-violet)',color:'#fff',fontSize:9}}>
+                        ⚡ {ds.high_frequency_patterns.length} 个高频模式
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+            {postmortem._pipeline_extras.aggregation_count > 0 && (
+              <div className="card" style={{ borderColor: 'var(--sig-amber)', borderLeftWidth: 3 }}>
+                <div className="info-row">
+                  <span className="info-label">🧠 聚合提炼</span>
+                  <span className="badge" style={{background:'var(--sig-amber)',color:'#000'}}>
+                    {postmortem._pipeline_extras.aggregation_count} 模式
+                  </span>
+                </div>
+              </div>
+            )}
+            {postmortem._pipeline_extras.skill_updates && postmortem._pipeline_extras.skill_updates.length > 0 && (
+              <div className="card" style={{ borderColor: 'var(--sig-green)', borderLeftWidth: 3 }}>
+                <div className="info-row">
+                  <span className="info-label">📝 SKILL更新</span>
+                  <span className="badge ok">{postmortem._pipeline_extras.skill_updates.length} 文件</span>
+                </div>
+                {postmortem._pipeline_extras.skill_updates.map((u, i) => (
+                  <div key={i} style={{fontSize:10, marginTop:3}}>
+                    {u.auto_skill_created && (
+                      <span className="badge" style={{background:'var(--sig-green)',color:'#fff',fontSize:8,marginRight:4}}>
+                        NEW: {u.auto_skill_created}
+                      </span>
+                    )}
+                    <span className="muted">{u.asset_type}: {(u.ref_files_updated || []).join(', ') || u.pattern_key}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

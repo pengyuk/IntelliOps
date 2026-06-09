@@ -49,6 +49,8 @@ COPILOT_SYSTEM = """\
 - 当多个证据指向同一根因时，提高该根因的置信度
 - 当用户提供的信息与当前假设矛盾时，降低置信度并探索新假设
 - 每次回复最多提 1 个追问，不要让运维人员感到压迫
+- 🚫 如果上下文中包含"已排除的假设"或"已验证正常的项目"，绝对不要重复建议这些方向
+- 如果某个假设已被标记为 excluded，不要在 updated_root_causes 中重新提出，除非有全新的证据
 """
 
 COPILOT_USER_TEMPLATE = """\
@@ -111,6 +113,34 @@ def _format_executed_actions(logs: List[Dict[str, Any]], incident_id: str) -> st
     for log in relevant[-5:]:
         lines.append(f"- {log.get('script_name', log.get('action_id', 'unknown'))}: {log.get('conclusion', log.get('output', ''))[:100]}")
     return "\n".join(lines)
+
+
+def _format_excluded_hypotheses(diagnosis: Dict[str, Any]) -> str:
+    """P1-1: Format excluded investigation items to prevent Copilot from re-suggesting them."""
+    investigation_state = diagnosis.get('_investigation_state', {})
+    excluded = investigation_state.get('excluded', [])
+    verified = investigation_state.get('verified', [])
+    
+    if not excluded and not verified:
+        return ""
+    
+    lines = ["## 🚫 排查状态（请勿重复建议）"]
+    
+    if excluded:
+        lines.append("\n### ❌ 已排除的假设")
+        for item in excluded[-10:]:
+            name = item.get('name', '未知')
+            reason = item.get('reason', item.get('detail', ''))
+            lines.append(f"- {name}: {reason}"[:150])
+    
+    if verified:
+        lines.append("\n### ✅ 已验证正常的项目")
+        for item in verified[-10:]:
+            name = item.get('name', '未知')
+            lines.append(f"- {name}（已验证正常）"[:100])
+    
+    lines.append("\n**注意**：以上项目已被排除或验证，请勿在 suggested_actions 或 follow_up_question 中重复建议。")
+    return '\n'.join(lines)
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -225,10 +255,23 @@ class Copilot:
         # Inject skill context if available
         if skill_context:
             skill_block = _format_skill_context_for_user_prompt(skill_context)
-            # Insert skill context right before the user message
             base = base.replace(
                 "## 运维人员最新输入",
                 skill_block + "\n\n---\n## 运维人员最新输入"
+            )
+        # P0-2: Inject discussion context (dev/maintainer conversations)
+        discussion_ctx = diagnosis.get('_discussion_context', '')
+        if discussion_ctx:
+            base = base.replace(
+                "## 运维人员最新输入",
+                discussion_ctx + "\n\n---\n## 运维人员最新输入"
+            )
+        # P1-1: Inject excluded hypotheses from InvestigationState
+        excluded_block = _format_excluded_hypotheses(diagnosis)
+        if excluded_block:
+            base = base.replace(
+                "## 运维人员最新输入",
+                excluded_block + "\n\n---\n## 运维人员最新输入"
             )
         return base
 

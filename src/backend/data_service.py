@@ -70,9 +70,18 @@ class DataService:
         print(f"[DataService] ✓ All data loaded successfully")
 
     def _ensure_loaded(self) -> None:
-        """Lazy-load data on first access if not already loaded."""
-        if not self._loaded:
-            self.load_all()
+        """Lazy-load data on first access if not already loaded.
+        
+        Set SKIP_DATA_LOAD=1 to skip loading Excel/Word files on API access.
+        Data can still be loaded via POST /data/reload.
+        """
+        if self._loaded:
+            return
+        if os.environ.get("SKIP_DATA_LOAD", "0") == "1":
+            print("[DataService] ⏩ SKIP_DATA_LOAD=1 — skipping data file loading")
+            self._loaded = True  # mark as loaded so we don't retry
+            return
+        self.load_all()
 
     def reload(self) -> Dict[str, Any]:
         self._loaded = False

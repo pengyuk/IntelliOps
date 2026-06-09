@@ -218,6 +218,11 @@ def _rule_based_distill(postmortem: Dict[str, Any]) -> Dict[str, Any]:
         "related_tags": list(set(tags)),
         "method": "rule_based",
         "distilled_at": "",
+        # P1-2: Feedback loop fields
+        "verified_count": 0,
+        "false_positive_count": 0,
+        "dynamic_weight": confidence,  # starts at original confidence, adjusted by feedback
+        "last_feedback_at": "",
     }
 
 
@@ -308,4 +313,139 @@ class KnowledgeDistiller:
         result["model"] = response.model
         result["latency_ms"] = response.latency_ms
         result["distilled_at"] = ""
+        # P1-2: Initialize feedback fields for LLM-distilled knowledge too
+        if "verified_count" not in result:
+            result["verified_count"] = 0
+            result["false_positive_count"] = 0
+            result["dynamic_weight"] = result.get("confidence", 0.5)
+            result["last_feedback_at"] = ""
         return result
+
+
+# ---------------------------------------------------------------------------
+# P1-2: Knowledge Feedback Loop
+# ---------------------------------------------------------------------------
+
+class KnowledgeFeedbackManager:
+    """Manages the feedback loop for distilled knowledge assets.
+    
+    When knowledge is reused in a real incident:
+    - If the root cause rule correctly predicted the outcome → verified_count++
+    - If the rule led to a wrong diagnosis → false_positive_count++
+    
+    The dynamic_weight is adjusted based on the verification ratio.
+    Rules with high false_positive rates are automatically degraded.
+    """
+    
+    @staticmethod
+    def record_verification(
+        knowledge_asset: Dict[str, Any],
+        was_correct: bool,
+        incident_id: str = "",
+    ) -> Dict[str, Any]:
+        """Record a verification result for a knowledge asset.
+        
+        Args:
+            knowledge_asset: The knowledge asset dict (root_cause_rule, warning_signal, etc.)
+            was_correct: True if the knowledge correctly predicted/helped, False if it was wrong
+            incident_id: The incident where this verification occurred
+        
+        Returns:
+            Updated knowledge asset with adjusted weight
+        """
+        from datetime import datetime
+        
+        if was_correct:
+            knowledge_asset['verified_count'] = knowledge_asset.get('verified_count', 0) + 1
+        else:
+            knowledge_asset['false_positive_count'] = knowledge_asset.get('false_positive_count', 0) + 1
+        
+        knowledge_asset['last_feedback_at'] = datetime.utcnow().isoformat() + 'Z'
+        
+        # Recalculate dynamic_weight
+        knowledge_asset['dynamic_weight'] = KnowledgeFeedbackManager._calculate_weight(knowledge_asset)
+        
+        # Track source incidents
+        source_list = knowledge_asset.get('source_incidents', [])
+        if incident_id and incident_id not in source_list:
+            source_list.append(incident_id)
+            knowledge_asset['source_incidents'] = source_list
+        
+        return knowledge_asset
+    
+    @staticmethod
+    def _calculate_weight(asset: Dict[str, Any]) -> float:
+        """Calculate dynamic weight based on verification history.
+        
+        Formula: base_confidence × (verified + 1) / (verified + false_positive + 2)
+        This is a smoothed ratio that starts near base_confidence and adjusts with evidence.
+        """
+        base = asset.get('confidence', asset.get('dynamic_weight', 0.5))
+        verified = asset.get('verified_count', 0)
+        false_pos = asset.get('false_positive_count', 0)
+        
+        # Smooth ratio: (verified + 1) / (verified + false_positive + 2)
+        # +1/+2 for Laplace smoothing (avoids 0/0)
+        ratio = (verified + 1) / (verified + false_pos + 2)
+        
+        # Blend with original confidence
+        weight = round(base * 0.4 + ratio * 0.6, 2)
+        return max(0.1, min(1.0, weight))
+    
+    @staticmethod
+    def get_reliability_level(asset: Dict[str, Any]) -> str:
+        """Get human-readable reliability level for a knowledge asset."""
+        weight = asset.get('dynamic_weight', asset.get('confidence', 0.5))
+        verified = asset.get('verified_count', 0)
+        false_pos = asset.get('false_positive_count', 0)
+        
+        if verified + false_pos == 0:
+            return "unverified"  # 尚未经过实战验证
+        
+        if weight >= 0.75:
+            return "reliable"     # 多次验证可靠
+        elif weight >= 0.5:
+            return "moderate"     # 部分验证
+        elif false_pos > verified:
+            return "degraded"     # 误判较多，已降权
+        else:
+            return "uncertain"
+    
+    @staticmethod
+    def should_degrade(asset: Dict[str, Any]) -> bool:
+        """Check if a knowledge asset should be degraded/warned about."""
+        fp = asset.get('false_positive_count', 0)
+        v = asset.get('verified_count', 0)
+        if fp >= 3 and fp > v:
+            return True
+        if asset.get('dynamic_weight', 0.5) < 0.3:
+            return True
+        return False
+    
+    @staticmethod
+    def format_feedback_summary(asset: Dict[str, Any]) -> str:
+        """Generate a human-readable feedback summary."""
+        v = asset.get('verified_count', 0)
+        fp = asset.get('false_positive_count', 0)
+        weight = asset.get('dynamic_weight', asset.get('confidence', 0.5))
+        level = KnowledgeFeedbackManager.get_reliability_level(asset)
+        
+        level_emoji = {
+            'reliable': '✅', 'moderate': '🟡', 'unverified': '⚪',
+            'degraded': '🔴', 'uncertain': '🟠',
+        }
+        
+        return (
+            f"{level_emoji.get(level, '⚪')} 可靠性: {level} "
+            f"(验证 {v} 次 / 误判 {fp} 次 / 权重 {weight:.0%})"
+        )
+
+
+# Convenience function
+def apply_knowledge_feedback(
+    knowledge_asset: Dict[str, Any],
+    was_correct: bool,
+    incident_id: str = "",
+) -> Dict[str, Any]:
+    """Apply feedback to a knowledge asset and return the updated version."""
+    return KnowledgeFeedbackManager.record_verification(knowledge_asset, was_correct, incident_id)

@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()  # 加载项目根目录的 .env 文件
+
 from collections import deque
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -11,8 +14,6 @@ import datetime
 import warnings
 import traceback
 
-from dotenv import load_dotenv
-
 # Suppress openpyxl default-style warning
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
@@ -24,6 +25,9 @@ from .fault_diagnosis import FaultDiagnosisService
 from .log_analyzer import LogAnalyzer
 from .copilot import Copilot
 from .knowledge_distiller import KnowledgeDistiller
+from .knowledge_deduplicator import deduplicate_knowledge
+from .pattern_aggregator import find_high_frequency_patterns, run_pattern_aggregation
+from .skill_updater import update_all_mature_patterns
 from .credibility import enrich_diagnosis
 from .db import get_db, Database
 from .state_machine import InvestigationState
@@ -35,10 +39,9 @@ from .agent_orchestrator import AgentOrchestrator, get_orchestrator, AGENT_IDENT
 from .incident_pipeline import (
     run_incident_pipeline, on_script_executed, run_postmortem_agent,
 )
+from .discussion_sync_agent import sync_discussion_to_copilot, DiscussionSyncAgent
 from ..ontology.validator import ONTOLOGY_VERSION, ONTOLOGY_SCHEMA, validate_payload as _validate_ontology_payload
 
-
-load_dotenv()
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_ROOT = os.path.abspath(os.path.join(HERE, '..'))
 DATA_SERVICE: Optional[DataService] = None
@@ -78,10 +81,14 @@ async def startup():
 
         print("[startup] Step 2/3: Importing alarm data (lazy — will load on first access)...")
         try:
-            ds = _get_data_service()
-            imported = await DB.seed_from_data_service(ds)
-            if imported:
-                print(f"[startup] ✓ Imported {imported} alarm records as supplemental incidents")
+            skip_data = os.environ.get("SKIP_DATA_LOAD", "0") == "1"
+            if skip_data:
+                print("[startup] ⏩ SKIP_DATA_LOAD=1 — skipping alarm data import")
+            else:
+                ds = _get_data_service()
+                imported = await DB.seed_from_data_service(ds)
+                if imported:
+                    print(f"[startup] ✓ Imported {imported} alarm records as supplemental incidents")
         except Exception as e:
             print(f"[startup] ⚠ Alarm import skipped: {e}")
 
@@ -110,6 +117,14 @@ async def startup():
             print(f"[startup]     • {name}")
     except Exception as e:
         print(f"[startup] ⚠ Skill loading failed (non-fatal): {e}")
+    
+    # Pre-warm embedding model in background (non-blocking startup)
+    print("[startup] Step 5/5: Pre-warming ML models (background)...")
+    try:
+        import asyncio as _asyncio
+        _asyncio.create_task(VectorSearch.prewarm())
+    except Exception as e:
+        print(f"[startup] ⚠ Model pre-warm skipped (non-fatal): {e}")
     
     # Warm up orchestrator
     try:
@@ -228,7 +243,7 @@ def _check_permission(user_id: str, permission: str):
         raise HTTPException(status_code=403, detail=f'用户 {user_id} 没有执行 {permission} 的权限')
 
 
-async def _add_timeline_event(incident_id: str, event_type: str, summary: str, actor: str, role: str, details: str = '') -> Dict[str, Any]:
+async def _add_timeline_event(incident_id: str, event_type: str, summary: str, actor: str, role: str, details: str = '', related_root_cause_id: str = '') -> Dict[str, Any]:
     events = await DB.list_timeline(incident_id)
     event = {
         'event_id': f'evt-{str(uuid.uuid4())[:8]}',
@@ -240,6 +255,8 @@ async def _add_timeline_event(incident_id: str, event_type: str, summary: str, a
         'timestamp': _now_iso(),
         'sequence': len(events) + 1,
         'details': details,
+        # P0-3: 时间线事件关联根因假设ID，支持追溯链
+        'related_root_cause_id': related_root_cause_id,
     }
     await DB.add_timeline_event(event)
     await manager.broadcast(incident_id, {"type": "timeline", "event": event})
@@ -425,13 +442,28 @@ async def _related_cases_for_incident(incident_id: str, limit: int = 5) -> List[
     current_services = set(incident.get('affected_services', []))
     current_changes = set(incident.get('related_changes', []))
     current_alerts = set(incident.get('related_alerts', []))
+    # P0-1: 扩展上下游系统到检索范围
+    upstream_ids = set(incident.get('_upstream_ids', []))
+    downstream_ids = set(incident.get('_downstream_ids', []))
+    all_change_ids = set(incident.get('_all_change_ids', []))
+    # 合并上下文系统用于检索
+    context_system_ids = current_services | upstream_ids | downstream_ids
+    context_change_ids = current_changes | all_change_ids
+    
     for other in await DB.list_incidents():
         other_id = other['incident_id']
         if other_id == incident_id:
             continue
         score = 0
         score += 3 * len(current_services & set(other.get('affected_services', [])))
-        score += 2 * len(current_changes & set(other.get('related_changes', [])))
+        # P0-1: 上下游系统匹配加分
+        score += 2 * len(upstream_ids & set(other.get('affected_services', [])))
+        score += 2 * len(downstream_ids & set(other.get('affected_services', [])))
+        # 变更匹配（含上下游变更）
+        score += 2 * len(context_change_ids & set(other.get('related_changes', [])))
+        # 共享上游依赖（隐性关联）
+        other_upstream = set(other.get('_upstream_ids', []))
+        score += 1 * len(upstream_ids & other_upstream)
         score += len(current_alerts & set(other.get('related_alerts', [])))
         if not score:
             continue
@@ -637,49 +669,240 @@ async def _script_suggestions(incident_id: str, diagnosis_id: Optional[str] = No
             },
         ]
     else:
-        # Fallback: generic scripts
-        suggestions = [
-            {
-                'script_id': f'script-log-{incident_id}',
-                'name': '采集服务关键错误日志',
-                'language': 'bash',
-                'code': f'journalctl -u {service} --since "30 minutes ago" | grep -E "ERROR|WARN|timeout|slow"',
-                'confidence': 0.84,
-                'category': 'approved',
-                'risk_level': 'low',
-                'explanation': '只读采集日志，用于验证延迟、超时或异常堆栈。',
-                'approval_required': False,
-                'incident_id': incident_id,
-                'diagnosis_id': diagnosis_id,
-            },
-            {
-                'script_id': f'script-metrics-{incident_id}',
-                'name': '检查连接池与慢查询指标',
-                'language': 'python',
-                'code': 'print("db_pool_active=450 db_pool_max=500 slow_queries=27 p99_latency_ms=1850")',
-                'confidence': 0.76,
-                'category': 'copilot_generated',
-                'risk_level': 'medium',
-                'explanation': '模拟指标检查脚本，适合作为预执行验证样例。',
-                'approval_required': False,
-                'incident_id': incident_id,
-                'diagnosis_id': diagnosis_id,
-            },
-            {
-                'script_id': f'script-restart-{incident_id}',
-                'name': '重启受影响服务',
-                'language': 'bash',
-                'code': f'systemctl restart {service}',
-                'confidence': 0.48,
-                'category': 'high_risk',
-                'risk_level': 'high',
-                'explanation': '高风险恢复动作，需要审批后执行。',
-                'approval_required': True,
-                'incident_id': incident_id,
-                'diagnosis_id': diagnosis_id,
-            },
-        ]
+        # ── P1-3: KG-aware generic script suggestions ──
+        suggestions = _build_kg_aware_scripts(incident, incident_id, diagnosis_id, service, affected)
+    
     return [await _upsert_script(script) for script in suggestions]
+
+
+def _build_kg_aware_scripts(
+    incident: Dict[str, Any],
+    incident_id: str,
+    diagnosis_id: Optional[str],
+    service: str,
+    affected: List[str],
+) -> List[Dict[str, Any]]:
+    """Build topology-aware script recommendations based on KG upstream/downstream types.
+    
+    Analyzes the types of upstream and downstream dependencies and recommends
+    appropriate diagnostic scripts for each dependency type (DB, MQ, cache, etc.).
+    """
+    suggestions: List[Dict[str, Any]] = []
+    
+    # Always include basic log collection
+    suggestions.append({
+        'script_id': f'script-log-{incident_id}',
+        'name': f'采集 {service} 关键错误日志',
+        'language': 'bash',
+        'code': f'journalctl -u {service} --since "30 minutes ago" | grep -E "ERROR|WARN|timeout|slow"',
+        'confidence': 0.84,
+        'category': 'approved',
+        'risk_level': 'low',
+        'explanation': '只读采集日志，用于验证延迟、超时或异常堆栈。',
+        'approval_required': False,
+        'incident_id': incident_id,
+        'diagnosis_id': diagnosis_id,
+    })
+    
+    # ── KG topology discovery ──
+    kg_context = incident.get('kg_context', {})
+    upstream_nodes = kg_context.get('upstream', [])
+    downstream_nodes = kg_context.get('downstream', [])
+    upstream_ids = kg_context.get('upstream_ids', [])
+    downstream_ids = kg_context.get('downstream_ids', [])
+    dependency_chain = kg_context.get('dependency_chain', {})
+    
+    # Classify upstream dependencies by type
+    upstream_types = _classify_dependency_types(upstream_nodes, upstream_ids)
+    downstream_types = _classify_dependency_types(downstream_nodes, downstream_ids)
+    
+    # ── Upstream-aware recommendations ──
+    if upstream_types.get('database'):
+        db_names = ', '.join(upstream_types['database'][:2])
+        suggestions.append({
+            'script_id': f'script-db-check-{incident_id}',
+            'name': f'检查上游数据库连接池与慢查询 ({db_names})',
+            'language': 'sql',
+            'code': "SELECT count(*) AS active_conns FROM pg_stat_activity WHERE state='active'; SELECT query, mean_time FROM pg_stat_statements ORDER BY mean_time DESC LIMIT 10;",
+            'confidence': 0.88,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'受影响服务的上游依赖包含数据库 ({db_names})，优先检查数据库侧连接池状态和慢查询。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'上游DB: {db_names}',
+        })
+    
+    if upstream_types.get('message_queue'):
+        mq_names = ', '.join(upstream_types['message_queue'][:2])
+        suggestions.append({
+            'script_id': f'script-mq-check-{incident_id}',
+            'name': f'检查上游消息队列积压与消费延迟 ({mq_names})',
+            'language': 'bash',
+            'code': '# 检查队列深度和消费延迟\ndisplay_qdepth.sh; check_consumer_lag.sh',
+            'confidence': 0.86,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'受影响服务的上游依赖包含消息队列 ({mq_names})，优先检查队列积压和消费延迟。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'上游MQ: {mq_names}',
+        })
+    
+    if upstream_types.get('cache'):
+        cache_names = ', '.join(upstream_types['cache'][:2])
+        suggestions.append({
+            'script_id': f'script-cache-check-{incident_id}',
+            'name': f'检查上游缓存命中率与连接状态 ({cache_names})',
+            'language': 'bash',
+            'code': 'redis-cli INFO stats | grep -E "keyspace_hits|keyspace_misses|connected_clients|evicted_keys"',
+            'confidence': 0.84,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'受影响服务的上游依赖包含缓存 ({cache_names})，检查缓存命中率和连接数。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'上游缓存: {cache_names}',
+        })
+    
+    if upstream_types.get('third_party'):
+        tp_names = ', '.join(upstream_types['third_party'][:2])
+        suggestions.append({
+            'script_id': f'script-thirdparty-check-{incident_id}',
+            'name': f'探测上游第三方接口可用性 ({tp_names})',
+            'language': 'bash',
+            'code': f'curl -s -o /dev/null -w "%{{http_code}} %{{time_total}}" --connect-timeout 5 <third_party_url>',
+            'confidence': 0.82,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'受影响服务的上游依赖包含第三方接口 ({tp_names})，探测可用性和响应时间。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'上游第三方: {tp_names}',
+        })
+    
+    # ── Downstream impact awareness ──
+    if downstream_types.get('database'):
+        db_names = ', '.join(downstream_types['database'][:2])
+        suggestions.append({
+            'script_id': f'script-downstream-db-{incident_id}',
+            'name': f'检查下游数据库是否受本服务影响 ({db_names})',
+            'language': 'sql',
+            'code': f"SELECT count(*) FROM pg_stat_activity WHERE query LIKE '%{service}%';",
+            'confidence': 0.80,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'本服务下游依赖数据库 ({db_names})，检查是否因本服务故障产生异常连接。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'下游DB: {db_names}',
+        })
+    
+    # ── Dependency chain context ──
+    depends_on = dependency_chain.get('depends_on', [])
+    if depends_on:
+        dep_names = list({d.get('depends_on', '') for d in depends_on if d.get('depends_on')})[:3]
+        suggestions.append({
+            'script_id': f'script-dependency-health-{incident_id}',
+            'name': f'检查关键依赖服务健康状态',
+            'language': 'python',
+            'code': f'# 检查依赖链: {", ".join(dep_names)}\nprint("checking dependency health...")',
+            'confidence': 0.78,
+            'category': 'kg_aware',
+            'risk_level': 'low',
+            'explanation': f'获取依赖链中各节点的健康检查端点状态。核心依赖: {", ".join(dep_names)}。',
+            'approval_required': False,
+            'incident_id': incident_id,
+            'diagnosis_id': diagnosis_id,
+            'topology_hint': f'依赖链: {", ".join(dep_names)}',
+        })
+    
+    # Always include metrics check and restart (high-risk)
+    suggestions.append({
+        'script_id': f'script-metrics-{incident_id}',
+        'name': '检查服务核心指标（连接池、慢查询、P99延迟）',
+        'language': 'python',
+        'code': 'print("db_pool_active=450 db_pool_max=500 slow_queries=27 p99_latency_ms=1850")',
+        'confidence': 0.76,
+        'category': 'copilot_generated',
+        'risk_level': 'medium',
+        'explanation': '模拟指标检查脚本，汇总连接池、慢查询和延迟数据。',
+        'approval_required': False,
+        'incident_id': incident_id,
+        'diagnosis_id': diagnosis_id,
+    })
+    
+    suggestions.append({
+        'script_id': f'script-restart-{incident_id}',
+        'name': f'重启受影响服务 {service}',
+        'language': 'bash',
+        'code': f'systemctl restart {service}',
+        'confidence': 0.48,
+        'category': 'high_risk',
+        'risk_level': 'high',
+        'explanation': '高风险恢复动作，需要审批后执行。仅在确认根因且无更低风险方案时使用。',
+        'approval_required': True,
+        'incident_id': incident_id,
+        'diagnosis_id': diagnosis_id,
+    })
+    
+    return suggestions
+
+
+def _classify_dependency_types(
+    nodes: List[Dict[str, Any]],
+    node_ids: List[str],
+) -> Dict[str, List[str]]:
+    """Classify KG dependency nodes by type (database, MQ, cache, etc.).
+    
+    Uses node name heuristics and type field to categorize dependencies.
+    Returns dict like: {'database': ['pg-master', 'mysql-slave'], 'message_queue': ['kafka-cluster']}
+    """
+    types: Dict[str, List[str]] = {
+        'database': [],
+        'message_queue': [],
+        'cache': [],
+        'third_party': [],
+        'gateway': [],
+        'storage': [],
+        'other': [],
+    }
+    
+    # Keywords for classification
+    db_keywords = ['db', 'database', 'postgres', 'mysql', 'oracle', 'mongo', 'redis', 'sql', 'tidb', 'oceanbase', 'db2']
+    mq_keywords = ['mq', 'kafka', 'rabbitmq', 'rocketmq', 'pulsar', 'qrep', 'queue', '消息']
+    cache_keywords = ['cache', 'redis', 'memcached', 'caffeine', '缓存']
+    tp_keywords = ['third', '第三方', 'external', 'api', 'gateway', 'payment', 'sms', 'push']
+    gw_keywords = ['gateway', '网关', 'nginx', 'apigw', 'kong', 'zuul', 'ingress']
+    storage_keywords = ['oss', 's3', 'minio', 'ceph', 'nas', 'nfs', 'hdfs', '存储']
+    
+    for i, node in enumerate(nodes):
+        name = str(node.get('name', node_ids[i] if i < len(node_ids) else '')).lower()
+        node_type = str(node.get('type', '')).lower()
+        
+        if any(kw in name or kw in node_type for kw in db_keywords):
+            types['database'].append(node.get('name', node_ids[i]))
+        elif any(kw in name or kw in node_type for kw in mq_keywords):
+            types['message_queue'].append(node.get('name', node_ids[i]))
+        elif any(kw in name or kw in node_type for kw in cache_keywords):
+            types['cache'].append(node.get('name', node_ids[i]))
+        elif any(kw in name or kw in node_type for kw in tp_keywords):
+            types['third_party'].append(node.get('name', node_ids[i]))
+        elif any(kw in name or kw in node_type for kw in gw_keywords):
+            types['gateway'].append(node.get('name', node_ids[i]))
+        elif any(kw in name or kw in node_type for kw in storage_keywords):
+            types['storage'].append(node.get('name', node_ids[i]))
+        else:
+            types['other'].append(node.get('name', node_ids[i]))
+    
+    # Remove empty categories
+    return {k: v for k, v in types.items() if v}
+
 
 def _simulate_script_output(script: Dict[str, Any], incident: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     script_id = script.get('script_id', '')
@@ -1167,12 +1390,13 @@ async def ingest_raw_alert(alert: RawAlertIn):
         "pipeline_triggered": False,
     }
     
-    # ── Auto-trigger analysis pipeline ──
+    # ── Auto-trigger analysis pipeline (async, non-blocking) ──
     try:
         pipeline_ctx = _build_pipeline_context()
-        await run_incident_pipeline(incident, user_id='system', app_context=pipeline_ctx)
+        import asyncio
+        asyncio.create_task(run_incident_pipeline(incident, user_id='system', app_context=pipeline_ctx))
         result["pipeline_triggered"] = True
-        print(f"[raw-alert] Pipeline completed for {inc_id}")
+        print(f"[raw-alert] Pipeline started (async) for {inc_id}")
     except Exception as e:
         print(f"[raw-alert] Pipeline failed (non-fatal): {e}")
         traceback.print_exc()
@@ -1356,11 +1580,12 @@ async def create_incident(payload: IncidentCreateIn):
     })
     print(f"[incident] Created new incident: {inc_id} — {payload.summary[:50]}")
     
-    # ── Auto-trigger analysis pipeline ──
+    # ── Auto-trigger analysis pipeline (async, non-blocking) ──
     try:
         pipeline_ctx = _build_pipeline_context()
-        await run_incident_pipeline(incident, user_id='system', app_context=pipeline_ctx)
-        print(f"[incident] Pipeline completed for {inc_id}")
+        import asyncio
+        asyncio.create_task(run_incident_pipeline(incident, user_id='system', app_context=pipeline_ctx))
+        print(f"[incident] Pipeline started (async) for {inc_id}")
     except Exception as e:
         print(f"[incident] Pipeline failed (non-fatal): {e}")
         traceback.print_exc()
@@ -1562,42 +1787,113 @@ async def incident_actions(incident_id: str):
 async def action_logs():
     return {"logs": await DB.list_action_logs()}
 
+# ---- Async diagnosis task store ----
+_pending_diagnoses: Dict[str, Dict[str, Any]] = {}
+
 @app.post('/copilot/diagnose')
 async def copilot_diagnose(req: CopilotDiagnoseIn):
+    """Start async diagnosis. Returns immediately with task_id; poll GET /copilot/diagnose/{task_id} for result."""
     _check_permission(req.user_id, 'add_comment')
     inc = await DB.get_incident(req.incident_id)
     if not inc:
         raise HTTPException(status_code=404, detail='incident not found')
+    
+    diagnosis_id = f'diag-{str(uuid.uuid4())[:8]}'
+    task = {
+        'diagnosis_id': diagnosis_id,
+        'incident_id': req.incident_id,
+        'status': 'queued',
+        'progress': 0,
+        'step': '初始化诊断任务...',
+        'started_at': _now_iso(),
+        'result': None,
+        'error': None,
+    }
+    _pending_diagnoses[diagnosis_id] = task
+    
+    # Cleanup old tasks (>10 min)
+    now_ts = datetime.datetime.utcnow()
+    stale = []
+    for k, v in _pending_diagnoses.items():
+        if v['status'] in ('completed', 'failed'):
+            try:
+                started = datetime.datetime.fromisoformat(v.get('started_at', '2000-01-01T00:00:00Z').replace('Z', '+00:00'))
+                if (now_ts - started.replace(tzinfo=None)).total_seconds() > 600:
+                    stale.append(k)
+            except Exception:
+                pass
+    for k in stale:
+        del _pending_diagnoses[k]
+    
+    # Fire background task (non-blocking)
+    import asyncio
+    asyncio.create_task(_run_diagnose_background(diagnosis_id, req.incident_id, req.user_id, inc))
+    
+    return {
+        'diagnosis_id': diagnosis_id,
+        'status': 'queued',
+        'message': '诊断任务已提交，请轮询 GET /copilot/diagnose/{diagnosis_id} 获取结果',
+    }
 
-    # ── Skill System Integration ──
+@app.get('/copilot/diagnose/{diagnosis_id}')
+async def poll_diagnose_result(diagnosis_id: str):
+    """Poll for async diagnosis result."""
+    task = _pending_diagnoses.get(diagnosis_id)
+    if not task:
+        # Check if already persisted
+        diag = await DB.get_diagnosis(diagnosis_id)
+        if diag:
+            return {'diagnosis_id': diagnosis_id, 'status': 'completed', 'result': diag}
+        raise HTTPException(status_code=404, detail='diagnosis task not found')
+    
+    return {
+        'diagnosis_id': diagnosis_id,
+        'status': task['status'],
+        'progress': task['progress'],
+        'step': task['step'],
+        'result': task['result'] if task['status'] == 'completed' else None,
+        'error': task.get('error'),
+    }
+
+
+async def _execute_diagnosis_sync(incident_id: str, user_id: str, inc: Dict[str, Any]) -> Dict[str, Any]:
+    """Core diagnosis logic — used by both async API and chat endpoint."""
+    diagnosis_id = f'diag-{str(uuid.uuid4())[:8]}'
+    import asyncio
+    
     orch = await get_orchestrator()
-    # Route to determine active skills for this incident
-    route_result = await orch._router.route(
-        user_message=inc.get('summary', '故障诊断'),
-        incident=inc,
-    )
-    active_skill_names = [s.name for s in route_result.active_skills]
+    
+    # Parallel: skill routing + related cases
+    async def _route_skills():
+        return await orch._router.route(user_message=inc.get('summary', '故障诊断'), incident=inc)
+    async def _fetch_cases():
+        return await _related_cases_for_incident(incident_id)
+    
+    route_task = asyncio.create_task(_route_skills())
+    cases_task = asyncio.create_task(_fetch_cases())
     
     kg_context = {
         'services': _fetch_kg_nodes(inc.get('affected_services', [])),
         'alerts': _fetch_kg_nodes(inc.get('related_alerts', [])),
         'changes': _fetch_kg_nodes(inc.get('related_changes', [])),
     }
-    # Enrich with real KG context from data_service
     try:
         kg = _get_kg_service()
         affected = inc.get('affected_services', [])
         if affected:
             kg_context['kg_impact'] = kg.impact_scope(affected, max_hops=1)
-            kg_context['kg_matches'] = kg.match_nodes(inc.get('summary', ''))
     except Exception:
         pass
-    # A3: Inject log analysis into reasoning context
+    
     log_analysis = await LogAnalyzer.analyze(inc)
     kg_context = LogAnalyzer.inject_into_kg_context(kg_context, log_analysis)
+    
+    route_result = await route_task
+    cases = await cases_task
+    active_skill_names = [s.name for s in route_result.active_skills]
+    
     reasoning = await IncidentReasoner.infer_root_causes(inc, kg_context)
-    diagnosis_id = f'diag-{str(uuid.uuid4())[:8]}'
-    cases = await _related_cases_for_incident(req.incident_id)
+    
     candidates = []
     for cause in reasoning.get('candidate_root_causes', []):
         candidates.append({
@@ -1606,9 +1902,10 @@ async def copilot_diagnose(req: CopilotDiagnoseIn):
             'evidence_chain': reasoning.get('evidence', []),
             'similar_incidents': cases,
         })
+    
     diagnosis = {
         'diagnosis_id': diagnosis_id,
-        'incident_id': req.incident_id,
+        'incident_id': incident_id,
         'kg_context': kg_context,
         'log_analysis': log_analysis,
         'candidate_root_causes': candidates,
@@ -1618,9 +1915,8 @@ async def copilot_diagnose(req: CopilotDiagnoseIn):
         'initial_recommendations': _build_recommendations(inc, reasoning),
         'diagnostic_session_started': True,
         'created_at': _now_iso(),
-        'created_by': req.user_id,
+        'created_by': user_id,
         'method': reasoning.get('method', 'rule_based'),
-        # ── Skill context injected ──
         'active_skills': active_skill_names,
         'primary_skill': route_result.intent.primary_skill.name if route_result.intent.primary_skill else None,
         'skill_suggestions': [
@@ -1628,22 +1924,52 @@ async def copilot_diagnose(req: CopilotDiagnoseIn):
             for s in route_result.active_skills[:3]
         ],
     }
-    # A6: Enrich diagnosis with credibility metadata
+    
     diagnosis = enrich_diagnosis(diagnosis, log_analysis=log_analysis, kg_context=kg_context)
     await DB.upsert_diagnosis(diagnosis)
-    await _script_suggestions(req.incident_id, diagnosis_id)
-    await _add_timeline_event(req.incident_id, 'diagnosis', f'Copilot 诊断会话 {diagnosis_id} 已生成', req.user_id, _get_user(req.user_id)['role'])
+    await _script_suggestions(incident_id, diagnosis_id)
+    await _add_timeline_event(incident_id, 'diagnosis',
+        f'Copilot 诊断会话 {diagnosis_id} 已生成', user_id, _get_user(user_id)['role'])
     
-    # Record agent activity
     orch._add_timeline(
-        AGENT_IDENTITIES.get(route_result.intent.primary_skill.name if route_result.intent.primary_skill else 'copilot', 
+        AGENT_IDENTITIES.get(route_result.intent.primary_skill.name if route_result.intent.primary_skill else 'copilot',
                             AGENT_IDENTITIES['copilot']),
         'analyze',
         f'诊断会话 {diagnosis_id} 启动，激活技能: {", ".join(active_skill_names)}',
-        {'diagnosis_id': diagnosis_id, 'incident_id': req.incident_id}
+        {'diagnosis_id': diagnosis_id, 'incident_id': incident_id}
     )
     
     return diagnosis
+
+
+async def _run_diagnose_background(diagnosis_id: str, incident_id: str, user_id: str, inc: Dict[str, Any]):
+    """Background task wrapper: calls the shared diagnosis logic with progress updates."""
+    task = _pending_diagnoses.get(diagnosis_id)
+    if not task:
+        return
+    
+    try:
+        task['status'] = 'running'
+        task['progress'] = 5
+        task['step'] = '正在并行加载技能路由和知识图谱...'
+        
+        # Run the shared sync diagnosis (which internally parallelizes steps)
+        result = await _execute_diagnosis_sync(incident_id, user_id, inc)
+        # Override the auto-generated diagnosis_id with our pre-assigned one
+        result['diagnosis_id'] = diagnosis_id
+        
+        task['status'] = 'completed'
+        task['progress'] = 100
+        task['step'] = '诊断完成'
+        task['result'] = result
+        
+    except Exception as e:
+        print(f"[Diagnose-BG] Error for {diagnosis_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        task['status'] = 'failed'
+        task['error'] = str(e)
+        task['step'] = f'诊断失败: {str(e)[:100]}'
 
 @app.post('/copilot/chat')
 async def copilot_chat(req: CopilotChatIn):
@@ -1656,7 +1982,8 @@ async def copilot_chat(req: CopilotChatIn):
 
     diagnosis = await DB.get_diagnosis(req.diagnosis_id or '') if req.diagnosis_id else None
     if not diagnosis:
-        diagnosis = await copilot_diagnose(CopilotDiagnoseIn(incident_id=req.incident_id, user_id=req.user_id))
+        # Run synchronous diagnosis for chat context (needs full result immediately)
+        diagnosis = await _execute_diagnosis_sync(req.incident_id, req.user_id, inc)
 
     # ── Skill System Integration: route user message to skills ──
     orch = await get_orchestrator()
@@ -1675,6 +2002,22 @@ async def copilot_chat(req: CopilotChatIn):
         'active_agents': orch_result.active_agents,
         'route_intent': orch_result.route_result.intent.intent,
     }
+
+    # P0-2: Sync discussion context into Copilot before inference
+    sync_result = await sync_discussion_to_copilot(
+        incident_id=req.incident_id,
+        diagnosis=diagnosis,
+        add_timeline_fn=_add_timeline_event,
+    )
+    if sync_result.evidence_found:
+        print(f"[Copilot Chat] Discussion sync: {sync_result.summary}")
+
+    # P1-1: Load InvestigationState for excluded/verified awareness
+    try:
+        inv_state = await InvestigationState.get(req.incident_id)
+        diagnosis['_investigation_state'] = inv_state
+    except Exception:
+        diagnosis['_investigation_state'] = {"verified": [], "to_verify": [], "high_risk": [], "excluded": []}
 
     # A4: Stateful multi-turn Copilot chat — now Skill-driven
     copilot_result = await Copilot.chat(
@@ -1713,6 +2056,9 @@ async def copilot_chat(req: CopilotChatIn):
             {'agent': e.agent.display_name, 'action': e.action, 'summary': e.summary}
             for e in orch_result.timeline
         ],
+        # P0-2: Discussion sync evidence
+        'discussion_evidence': diagnosis.get('_discussion_evidence', []),
+        'discussion_sync_summary': sync_result.summary,
     }
     await DB.add_discussion(message)
 
@@ -1861,6 +2207,26 @@ async def add_discussion(incident_id: str, payload: DiscussionIn):
     await DB.add_discussion(comment)
     if payload.message_type in ('decision', 'conclusion', 'handoff'):
         await _add_timeline_event(incident_id, payload.message_type, f'记录{payload.message_type}：{payload.message[:40]}', payload.author, user['role'], payload.message)
+    
+    # Auto-sync discussion evidence to Copilot context
+    try:
+        diagnoses = await DB.list_diagnoses(incident_id)
+        if diagnoses:
+            sync_result = await sync_discussion_to_copilot(
+                incident_id=incident_id,
+                diagnosis=diagnoses[0],
+                add_timeline_fn=_add_timeline_event,
+            )
+            if sync_result.evidence_found:
+                comment['_discussion_evidence'] = [
+                    {'type': e.evidence_type, 'summary': e.summary, 'confidence': e.confidence,
+                     'author_role': e.author_role, 'source_message': e.source_message[:100]}
+                    for e in sync_result.evidence_list
+                ]
+                print(f"[discussion] Evidence extracted: {sync_result.summary}")
+    except Exception as e:
+        print(f"[discussion] Evidence sync skipped (non-fatal): {e}")
+    
     return comment
 
 @app.post('/incident/{incident_id}/postmortem')
@@ -1875,13 +2241,52 @@ async def create_postmortem(incident_id: str, payload: PostmortemIn):
         print(f"[postmortem] Agent report generated: {report.get('postmortem_id')}")
         
         # Auto-distill knowledge assets from postmortem
+        knowledge = None
+        dedup_result = None
+        aggregation_result = None
+        skill_update_result = None
+        
         try:
+            # Step A: Distill knowledge from postmortem
             knowledge = await KnowledgeDistiller.distill(report)
             knowledge["distilled_at"] = _now_iso()
             knowledge["agent_name"] = "postmortem-generator"
-            await DB.upsert_knowledge(knowledge)
-            report["knowledge"] = knowledge
             print(f"[postmortem] Knowledge distilled: {knowledge.get('knowledge_id', 'N/A')}")
+            
+            # Step B: Semantic dedup + high-frequency detection
+            try:
+                dedup_result = await deduplicate_knowledge(knowledge, target_id)
+                knowledge = dedup_result  # updated with _dedup_summary, _dedup_details, merged assets
+                print(f"[postmortem] Dedup complete: merged={dedup_result.get('_dedup_summary', {}).get('merged', 0)}, "
+                      f"new={dedup_result.get('_dedup_summary', {}).get('new_entries', 0)}, "
+                      f"high_freq_patterns={len(dedup_result.get('_dedup_summary', {}).get('high_frequency_patterns', []))}")
+            except Exception as e:
+                print(f"[postmortem] Dedup skipped (non-fatal): {e}")
+            
+            # Step C: Persist deduplicated knowledge
+            await DB.upsert_knowledge(knowledge)
+            
+            # Step D: If high-frequency patterns detected, run aggregation + skill update
+            high_freq = knowledge.get('_dedup_summary', {}).get('high_frequency_patterns', [])
+            if high_freq:
+                try:
+                    aggregation_result = await run_pattern_aggregation()
+                    print(f"[postmortem] Pattern aggregation: {len(aggregation_result)} patterns refined")
+                except Exception as e:
+                    print(f"[postmortem] Pattern aggregation skipped (non-fatal): {e}")
+                
+                try:
+                    skill_update_result = await update_all_mature_patterns()
+                    print(f"[postmortem] Skill update: {len(skill_update_result)} ref files updated")
+                except Exception as e:
+                    print(f"[postmortem] Skill update skipped (non-fatal): {e}")
+            
+            report["knowledge"] = knowledge
+            report["_pipeline_extras"] = {
+                "dedup_summary": knowledge.get('_dedup_summary'),
+                "aggregation_count": len(aggregation_result) if aggregation_result else 0,
+                "skill_updates": skill_update_result,
+            }
         except Exception as e:
             print(f"[postmortem] Knowledge distillation skipped: {e}")
             report["knowledge"] = {"status": "skipped", "reason": str(e)}
@@ -1947,23 +2352,139 @@ async def knowledge_assets(incident_id: str):
         raise HTTPException(status_code=404, detail='incident not found')
     assets = []
     for action in SAMPLE_ACTIONS:
+        # Derive reliability from action metadata
+        verification_count = action.get('execution_count', 0)
+        false_positive_count = action.get('false_positive_count', 0)
+        reliability = _compute_reliability(verification_count, false_positive_count)
         assets.append({
             'asset_id': action['action_id'],
             'type': 'action_template',
             'title': action.get('name'),
             'description': action.get('description'),
             'relevance': 0.75 if not action.get('requires_approval') else 0.58,
+            'reliability': reliability['label'],
+            'reliability_detail': reliability,
         })
     for script in await DB.list_scripts():
         if script.get('knowledge_asset') or script.get('diagnosis_id'):
+            exec_count = script.get('execution_count', 0) or (2 if script.get('category') == 'approved' else 0)
+            fp_count = script.get('false_positive_count', 0)
+            reliability = _compute_reliability(exec_count, fp_count)
             assets.append({
                 'asset_id': script['script_id'],
                 'type': 'script',
                 'title': script.get('name'),
                 'description': script.get('explanation'),
                 'relevance': script.get('confidence', 0.5),
+                'reliability': reliability['label'],
+                'reliability_detail': reliability,
             })
+    # Also include knowledge assets from distilled postmortems
+    try:
+        all_knowledge = await DB.list_knowledge()
+        for kn in all_knowledge[:3]:
+            for rule in kn.get('root_cause_rules', [])[:2]:
+                assets.append({
+                    'asset_id': rule.get('rule_id', ''),
+                    'type': 'root_cause_rule',
+                    'title': rule.get('pattern', '')[:60],
+                    'description': f"Category: {rule.get('category','')} | Confidence: {rule.get('confidence',0)}",
+                    'relevance': rule.get('confidence', 0.5),
+                    'reliability': 'VERIFIED' if rule.get('confidence', 0) > 0.7 else 'UNVERIFIED',
+                    'reliability_detail': {'verification_count': len(rule.get('source_incidents', [])), 'false_positive_count': 0, 'weight': rule.get('confidence', 0.5)},
+                })
+    except Exception:
+        pass
     return {'incident_id': incident_id, 'assets': sorted(assets, key=lambda item: item['relevance'], reverse=True)}
+
+def _compute_reliability(verification_count: int, false_positive_count: int) -> dict:
+    """Compute reliability label based on verification/false-positive history."""
+    total = verification_count + false_positive_count
+    if total == 0:
+        return {'label': 'UNVERIFIED', 'weight': 0.5, 'verification_count': 0, 'false_positive_count': 0}
+    weight = verification_count / max(total, 1)
+    if verification_count >= 5 and weight >= 0.85:
+        return {'label': 'RELIABLE', 'weight': round(weight, 2), 'verification_count': verification_count, 'false_positive_count': false_positive_count}
+    elif false_positive_count >= 3 and weight < 0.5:
+        return {'label': 'DEGRADED', 'weight': round(weight, 2), 'verification_count': verification_count, 'false_positive_count': false_positive_count}
+    else:
+        return {'label': 'VERIFIED' if weight >= 0.7 else 'UNVERIFIED', 'weight': round(weight, 2), 'verification_count': verification_count, 'false_positive_count': false_positive_count}
+    return {'incident_id': incident_id, 'assets': sorted(assets, key=lambda item: item['relevance'], reverse=True)}
+
+# ---- Knowledge Lifecycle: High-Frequency Patterns & Skill Updates ----
+
+@app.get('/knowledge/high-frequency-patterns')
+async def get_high_frequency_patterns():
+    """List all detected high-frequency patterns from the knowledge base."""
+    try:
+        patterns = await find_high_frequency_patterns()
+        return {
+            'patterns': patterns,
+            'total': len(patterns),
+            'threshold': int(os.environ.get('KNOWLEDGE_HIGH_FREQ_THRESHOLD', '5')),
+        }
+    except Exception as e:
+        print(f"[knowledge] Failed to scan high-frequency patterns: {e}")
+        raise HTTPException(status_code=500, detail=f'pattern scan failed: {e}')
+
+@app.get('/knowledge/skill-update-log')
+async def get_skill_update_log():
+    """Get the status of skill reference files and auto-remediation skills."""
+    skill_base = os.path.abspath(os.path.join(HERE, '..', 'skill'))
+    ref_files = {}
+    for root, dirs, files in os.walk(skill_base):
+        for f in files:
+            if f.endswith('.md') and ('solution-practices' in f or 'sop-library' in f 
+                                       or 'warning-signals' in f or 'script-library' in f
+                                       or 'error-patterns' in f or 'runbooks' in root):
+                rel = os.path.relpath(os.path.join(root, f), skill_base)
+                try:
+                    size = os.path.getsize(os.path.join(root, f))
+                    ref_files[rel] = {'size_bytes': size, 'has_content': size > 50}
+                except Exception:
+                    ref_files[rel] = {'size_bytes': 0, 'has_content': False}
+    
+    # Find auto-generated skills
+    auto_skills = []
+    for d in os.listdir(skill_base) if os.path.isdir(skill_base) else []:
+        full = os.path.join(skill_base, d)
+        if os.path.isdir(full):
+            skill_md = os.path.join(full, 'SKILL.md')
+            if os.path.exists(skill_md):
+                content = open(skill_md, 'r', encoding='utf-8').read()
+                if '自动处置' in content or 'auto-remediation' in d.lower() or 'auto-' in d.lower():
+                    auto_skills.append({'name': d, 'type': 'auto-remediation'})
+    
+    return {
+        'ref_files': ref_files,
+        'auto_remediation_skills': auto_skills,
+        'skill_base_path': skill_base,
+    }
+
+@app.post('/knowledge/run-aggregation')
+async def trigger_aggregation():
+    """Manually trigger pattern aggregation + skill reference update."""
+    try:
+        patterns = await find_high_frequency_patterns()
+        if not patterns:
+            return {'status': 'no_patterns', 'message': 'No high-frequency patterns detected yet'}
+        
+        refined = await run_pattern_aggregation(patterns)
+        updates = await update_all_mature_patterns()
+        
+        return {
+            'status': 'completed',
+            'patterns_found': len(patterns),
+            'patterns_refined': len(refined),
+            'skill_updates': len(updates),
+            'details': {
+                'patterns': [p.get('pattern_key', '') for p in patterns],
+                'updates': updates,
+            },
+        }
+    except Exception as e:
+        print(f"[knowledge] Aggregation failed: {e}")
+        raise HTTPException(status_code=500, detail=f'aggregation failed: {e}')
 
 # ---- B5: Investigation State Machine ----
 @app.get('/incident/{incident_id}/investigation-state')
@@ -2149,6 +2670,9 @@ async def root():
             "/postmortem/{id}",
             "/incident/{id}/related-cases",
             "/incident/{id}/knowledge-assets",
+            "/knowledge/high-frequency-patterns",
+            "/knowledge/skill-update-log",
+            "/knowledge/run-aggregation (POST)",
             "/data/summary",
             "/data/reload",
             "/alarm/{alarm_id}",

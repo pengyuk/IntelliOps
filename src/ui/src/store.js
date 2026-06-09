@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 
-const API_BASE = '/api'
+// Auto-detect API base: Vite dev server proxies /api → backend, direct FastAPI has no /api prefix
+const API_BASE = window.location.port === '5173' ? '/api' : ''
 
 export const useStore = create((set, get) => ({
   // State
@@ -27,6 +28,17 @@ export const useStore = create((set, get) => ({
   primarySkill: null,
   agentTimeline: [],
 
+  // P0-1: Topology-aware context
+  upstreamSystems: [],
+  downstreamSystems: [],
+  upstreamChanges: [],
+
+  // P0-2: Discussion evidence
+  discussionEvidence: [],
+
+  // P1-1: Investigation state
+  investigationState: { verified: [], to_verify: [], high_risk: [], excluded: [] },
+
   // Computed
   currentUser: () => {
     const { users, userId } = get()
@@ -42,12 +54,33 @@ export const useStore = create((set, get) => ({
 
   // API helpers
   api: async (path, options = {}) => {
-    const res = await fetch(API_BASE + path, {
-      ...options,
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
-    })
-    if (!res.ok) throw new Error(await res.text())
-    return res.json()
+    const url = API_BASE + path
+    console.log(`[API] ${options.method || 'GET'} ${url}`)
+    // Use AbortController for configurable timeout (default 5 min for diagnose)
+    const timeout = options.timeout || (options.method === 'POST' ? 300000 : 30000)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeout)
+    try {
+      const res = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+      })
+      clearTimeout(timeoutId)
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error(`[API] Error ${res.status} from ${url}:`, errText)
+        throw new Error(`API ${res.status}: ${errText.slice(0, 200)}`)
+      }
+      return res.json()
+    } catch (err) {
+      clearTimeout(timeoutId)
+      if (err.name === 'AbortError') {
+        console.error(`[API] Timeout after ${timeout}ms: ${url}`)
+        throw new Error(`请求超时 (${Math.round(timeout/1000)}s)，后端可能正在加载模型，请稍后重试`)
+      }
+      throw err
+    }
   },
 
   // Data loading
@@ -77,6 +110,10 @@ export const useStore = create((set, get) => ({
       cases: inc.related_cases || [],
       scripts: inc.suggested_scripts || [],
       kgGraph: inc.kg_context || null,
+      // P0-1: Topology-aware context
+      upstreamSystems: (inc.kg_context || {}).upstream || [],
+      downstreamSystems: (inc.kg_context || {}).downstream || [],
+      upstreamChanges: (inc.kg_context || {}).upstream_changes || [],
     })
   },
 
@@ -131,6 +168,24 @@ export const useStore = create((set, get) => ({
     } catch { /* agents not critical */ }
   },
 
+  loadInvestigationState: async (incidentId) => {
+    try {
+      const data = await get().api(`/incident/${incidentId}/investigation-state`)
+      set({ investigationState: data })
+    } catch { set({ investigationState: { verified: [], to_verify: [], high_risk: [], excluded: [] } }) }
+  },
+
+  addInvestigationItem: async (incidentId, quadrant, item) => {
+    try {
+      const data = await get().api(`/incident/${incidentId}/investigation-state/item`, {
+        method: 'POST',
+        body: JSON.stringify({ quadrant, item })
+      })
+      await get().loadInvestigationState(incidentId)
+      return data
+    } catch (e) { console.warn('addInvestigationItem failed:', e) }
+  },
+
   loadActiveSkills: async (incidentId) => {
     try {
       const data = await get().api(`/incident/${incidentId}/active-skills`)
@@ -154,16 +209,60 @@ export const useStore = create((set, get) => ({
   // Actions
   runDiagnosis: async () => {
     const { selectedId, userId } = get()
-    const data = await get().api('/copilot/diagnose', {
+    if (!selectedId) throw new Error('未选择事故')
+    console.log('[Diagnose] Starting async diagnosis for incident:', selectedId)
+    
+    // Step 1: Submit async diagnosis
+    const task = await get().api('/copilot/diagnose', {
       method: 'POST',
       body: JSON.stringify({ incident_id: selectedId, user_id: userId })
     })
+    console.log('[Diagnose] Task queued:', task.diagnosis_id)
+    
+    // Update UI immediately to show progress
     set({ 
-      diagnosis: data,
-      activeSkills: data.active_skills || [],
-      primarySkill: data.primary_skill || null,
+      diagnosis: { diagnosis_id: task.diagnosis_id, status: 'queued', _progress: 0, _step: '提交诊断任务...' },
     })
-    await Promise.all([get().loadTimeline(selectedId), get().loadScripts(selectedId), get().loadAssets(selectedId)])
+    
+    // Step 2: Poll until complete
+    const diagnosisId = task.diagnosis_id
+    const maxAttempts = 90  // 90 * 2s = 3 min max
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 2000))  // 2s interval
+      try {
+        const poll = await get().api(`/copilot/diagnose/${diagnosisId}`)
+        console.log(`[Diagnose] Poll ${i+1}: status=${poll.status} progress=${poll.progress}%`)
+        
+        // Update progress in UI
+        set({
+          diagnosis: { 
+            diagnosis_id: diagnosisId, 
+            status: poll.status, 
+            _progress: poll.progress || 0, 
+            _step: poll.step || '' 
+          },
+        })
+        
+        if (poll.status === 'completed' && poll.result) {
+          const data = poll.result
+          set({ 
+            diagnosis: data,
+            activeSkills: data.active_skills || [],
+            primarySkill: data.primary_skill || null,
+          })
+          await Promise.all([get().loadTimeline(selectedId), get().loadScripts(selectedId), get().loadAssets(selectedId)])
+          console.log('[Diagnose] Complete!')
+          return
+        }
+        if (poll.status === 'failed') {
+          throw new Error(poll.error || '诊断任务失败')
+        }
+      } catch (e) {
+        if (e.message?.includes('diagnosis task not found')) continue // task not created yet
+        throw e
+      }
+    }
+    throw new Error('诊断超时（超过3分钟），请稍后重试')
   },
 
   sendDiscussion: async (text) => {
@@ -187,6 +286,10 @@ export const useStore = create((set, get) => ({
     if (data.active_skills) set({ activeSkills: data.active_skills })
     if (data.primary_skill) set({ primarySkill: data.primary_skill })
     if (data.agent_timeline) set({ agentTimeline: data.agent_timeline })
+    // P0-2: Capture discussion evidence from Copilot response
+    if (data.discussion_evidence) set({ discussionEvidence: data.discussion_evidence })
+    // P1-1: Capture investigation state if returned
+    if (data._investigation_state) set({ investigationState: data._investigation_state })
     await Promise.all([get().loadDiscussion(selectedId), get().loadTimeline(selectedId), get().loadScripts(selectedId)])
     return data
   },
